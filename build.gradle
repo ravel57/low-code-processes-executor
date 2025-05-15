@@ -2,58 +2,45 @@ plugins {
 	id 'java'
 	id 'application'
 	id 'org.jetbrains.kotlin.jvm' version '1.9.23'
-	id 'org.javamodularity.moduleplugin' version '1.8.12'
 	id 'org.openjfx.javafxplugin' version '0.0.13'
-	id 'org.beryx.jlink' version '2.25.0'
+	id 'org.javamodularity.moduleplugin' version '1.8.12'
 }
 
-group 'ru.ravel'
-version '1.0-SNAPSHOT'
+group = 'ru.ravel'
+version = '1.0-SNAPSHOT'
 
-repositories {
-	mavenCentral()
-}
+repositories { mavenCentral() }
 
-ext {
-	junitVersion = '5.10.2'
-}
-
-
-tasks.withType(JavaCompile) {
-	options.encoding = 'UTF-8'
-}
-
-application {
-	mainModule = 'ru.ravel.testjavafx'
-	mainClass = 'ru.ravel.testjavafx.HelloApplication'
-}
-kotlin {
-	jvmToolchain(17)
-}
+def javaFxVersion = '21.0.2'
 
 javafx {
-	version = '17.0.6'
+	version = javaFxVersion
 	modules = ['javafx.controls', 'javafx.fxml']
 }
 
 dependencies {
-
-	testImplementation("org.junit.jupiter:junit-jupiter-api:${junitVersion}")
-	testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:${junitVersion}")
+	implementation "org.jetbrains.kotlin:kotlin-stdlib"
 }
 
-test {
-	useJUnitPlatform()
+application {
+	mainClass = 'ru.ravel.testjavafx.HelloApplicationKt'
 }
 
-jlink {
-	imageZip = project.file("${buildDir}/distributions/app-${javafx.platform.classifier}.zip")
-	options = ['--strip-debug', '--compress', '2', '--no-header-files', '--no-man-pages']
-	launcher {
-		name = 'app'
-	}
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+	modularity.inferModulePath = true
 }
 
-jlinkZip {
-	group = 'distribution'
+tasks.named('compileKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
+	kotlinOptions.jvmTarget = '21'
+	destinationDirectory.set(
+			tasks.named('compileJava', JavaCompile).get().destinationDirectory
+	)
+}
+tasks.named('compileTestKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
+	kotlinOptions.jvmTarget = '21'
+	destinationDirectory.set(
+			tasks.named('compileTestJava', JavaCompile).get().destinationDirectory
+	)
 }
