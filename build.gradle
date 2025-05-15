@@ -9,7 +9,9 @@ plugins {
 group = 'ru.ravel'
 version = '1.0-SNAPSHOT'
 
-repositories { mavenCentral() }
+repositories {
+	mavenCentral()
+}
 
 def javaFxVersion = '21.0.2'
 
@@ -20,6 +22,10 @@ javafx {
 
 dependencies {
 	implementation "org.jetbrains.kotlin:kotlin-stdlib"
+	implementation 'org.openjfx:javafx-controls:19'
+	implementation 'org.openjfx:javafx-fxml:19'
+	implementation "com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2"
+	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2"
 }
 
 application {
@@ -37,10 +43,33 @@ tasks.named('compileKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
 	destinationDirectory.set(
 			tasks.named('compileJava', JavaCompile).get().destinationDirectory
 	)
+
+//	toolchain {
+//		languageVersion = JavaLanguageVersion.of(21)
+//	}
 }
 tasks.named('compileTestKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
 	kotlinOptions.jvmTarget = '21'
 	destinationDirectory.set(
 			tasks.named('compileTestJava', JavaCompile).get().destinationDirectory
 	)
+}
+
+jar {
+	manifest {
+		attributes(
+				'Main-Class': 'ru.ravel.testjavafx.MainApp'
+		)
+	}
+	from {
+		configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+	}
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+	kotlinOptions {
+		jvmTarget = "21" // или 17 — под вашу Java
+	}
 }
