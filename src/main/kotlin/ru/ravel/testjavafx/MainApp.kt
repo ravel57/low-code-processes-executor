@@ -34,7 +34,6 @@ class MainApp : Application() {
 	lateinit var scrollPane: ScrollPane
 
 
-
 	val windowW = 2000.0
 	val windowH = 1200.0
 	val gridCanvas = Canvas(2000.0, 1200.0)
@@ -267,15 +266,18 @@ class MainApp : Application() {
 				)
 			val defaultOutput = if (blockType == BlockType.EXIT) 0 else b.outputCount.coerceAtLeast(1)
 			val block = BlockNode(
-				b.x, b.y, b.name, blockType,
+				x = b.x,
+				y = b.y,
+				name = b.name,
+				blockType = blockType,
 				inputCount = defaultInput,
-				outputCount = defaultOutput
+				outputCount = defaultOutput,
+				serializedId = b.id,
+				inputFormat = b.inputFormat ?: "JSON",
+				code = b.code ?: "",
+				dataDocs = b.dataDocs ?: "",
+				otherInfo = b.otherInfo ?: "",
 			)
-			block.serializedId = b.id
-			block.inputFormat = b.inputFormat ?: "JSON"
-			block.code = b.code ?: ""
-			block.dataDocs = b.dataDocs ?: ""
-			block.otherInfo = b.otherInfo ?: ""
 			blocks.add(block)
 			idToBlock[b.id] = block
 			(scrollPane.content as? Pane)?.children?.add(block)
@@ -435,19 +437,16 @@ class MainApp : Application() {
 		val vValue = scrollPane.vvalue
 
 		// 2. Меняем контент (или делаем что угодно с блоками)
-		contentPane?.children?.clear()
-		for (block in blocks) {
-			contentPane?.children?.add(block)
+		val grid = gridCanvas
+		contentPane.children?.setAll(grid)
+		blocks.forEach {
+			contentPane.children?.add(it)
 		}
 
 		Platform.runLater {
 			scrollPane.hvalue = hValue
 			scrollPane.vvalue = vValue
 		}
-
-		// 3. Восстанавливаем положение камеры
-//		scrollPane.hvalue = hValue
-//		scrollPane.vvalue = vValue
 	}
 
 

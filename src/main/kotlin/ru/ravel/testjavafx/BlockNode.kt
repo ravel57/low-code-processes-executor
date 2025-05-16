@@ -28,7 +28,10 @@ class BlockNode(
 	var code: String = "",
 	var inputCount: Int = 1,
 	var outputCount: Int = 1,
-	var serializedId: Int? = nextBlockId++
+	var serializedId: Int? = nextBlockId++,
+	var inputFormat: String = "JSON",
+	var dataDocs: String = "",
+	var otherInfo: String = "",
 ) : Pane() {
 
 	private val width = 100.0
@@ -50,10 +53,7 @@ class BlockNode(
 			rect.fill = if (value) Color.LIGHTGREEN else blockType.color
 		}
 
-	var inputFormat: String = "JSON"
 
-	var dataDocs: String = ""
-	var otherInfo: String = ""
 
 	val connectedLines = mutableListOf<Connection>()
 
@@ -339,7 +339,6 @@ class BlockNode(
 			}
 		}
 		(scene?.window?.userData as? MainApp)?.setupHandlersForBlock(this)
-		println("Назначаю обработчики outputCircles.size = ${outputCircles.size}")
 	}
 
 	private fun createIOCircles() {
