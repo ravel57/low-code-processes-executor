@@ -28,13 +28,17 @@ class BlockNode(
 	var code: String = "",
 	var inputCount: Int = 1,
 	var outputCount: Int = 1,
+	var serializedId: Int? = nextBlockId++
 ) : Pane() {
+
 	private val width = 100.0
 	private val height = 40.0
 	private val rect = Rectangle(width, height)
 	private val label = Text(name)
 
-	var serializedId: Int? = null
+	companion object {
+		private var nextBlockId = 1
+	}
 
 	// Списки для кружочков
 	val inputCircles = mutableListOf<Circle>()
@@ -285,15 +289,33 @@ class BlockNode(
 		dialog.showAndWait()
 	}
 
-	/** Создаёт/пересоздаёт кружочки входов/выходов **/
 	private fun recreateIOCircles() {
-		// Удалить старые
+		// Удалить старые кружки
 		children.removeAll(inputCircles)
 		children.removeAll(outputCircles)
 		inputCircles.clear()
 		outputCircles.clear()
 		createIOCircles()
+
+		// 1. Удалить соединения с недопустимыми индексами (например, если выходов стало меньше)
+		val invalidConnections = connectedLines.filter {
+			it.from == this && it.fromPort >= outputCircles.size ||
+			it.to == this && it.toPort >= inputCircles.size
+		}
+		invalidConnections.forEach { conn ->
+			(scene?.window?.userData as? MainApp)?.let { app ->
+				app.connections.remove(conn)
+				conn.from.connectedLines.remove(conn)
+				conn.to.connectedLines.remove(conn)
+				(conn.line.parent as? Pane)?.children?.remove(conn.line)
+			}
+		}
+		connectedLines.removeAll(invalidConnections)
+
+		// 2. Обновить линии (перепривязать к новым кружкам)
 		updateConnectedLines()
+
+		// 3. Переназначить обработчики для новых кружков
 		(scene?.window?.userData as? MainApp)?.let { app ->
 			rebuildCirclesHandlers { outIndex, outCircle ->
 				outCircle.onMousePressed = javafx.event.EventHandler { event ->
@@ -316,9 +338,10 @@ class BlockNode(
 				}
 			}
 		}
+		(scene?.window?.userData as? MainApp)?.setupHandlersForBlock(this)
+		println("Назначаю обработчики outputCircles.size = ${outputCircles.size}")
 	}
 
-	/** Создаёт кружочки на основании inputCount/outputCount **/
 	private fun createIOCircles() {
 		// Очищаем старые кружки
 		children.removeAll(inputCircles)
@@ -485,7 +508,9 @@ class BlockNode(
 			circle.onMouseDragged = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY && mainApp.draggingLine != null) {
 					val paneCoords = mainApp.contentPane?.sceneToLocal(event.sceneX, event.sceneY)
-					if (paneCoords == null) return@EventHandler
+					if (paneCoords == null) {
+						return@EventHandler
+					}
 					mainApp.draggingLine!!.endX = paneCoords.x
 					mainApp.draggingLine!!.endY = paneCoords.y
 					event.consume()

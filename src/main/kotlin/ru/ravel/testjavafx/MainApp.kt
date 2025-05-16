@@ -32,21 +32,23 @@ class MainApp : Application() {
 	var selectedBlock: BlockNode? = null
 	var selectedConnection: Connection? = null
 	lateinit var scrollPane: ScrollPane
-	var contentPane: Pane? = null
+
+
+
+	val windowW = 2000.0
+	val windowH = 1200.0
 	val gridCanvas = Canvas(2000.0, 1200.0)
+	val contentPane = Pane().apply {
+		children.add(gridCanvas)
+		prefWidth = windowW * 3
+		prefHeight = windowH * 3
+		padding = Insets(10.0)
+		isFocusTraversable = true
+	}
+
 	var activeContextMenu: ContextMenu? = null
 
 	override fun start(primaryStage: Stage) {
-		val windowW = 900.0
-		val windowH = 600.0// или реальные размеры твоей рабочей области
-
-		val contentPane = Pane().apply {
-			children.add(gridCanvas)
-			prefWidth = windowW * 3
-			prefHeight = windowH * 3
-			padding = Insets(10.0)
-			isFocusTraversable = true
-		}
 
 		scrollPane = ScrollPane(contentPane).apply {
 			isPannable = false
@@ -103,7 +105,7 @@ class MainApp : Application() {
 				if (n is BlockNode || n is Circle) return@EventHandler // не показываем по блокам и кружкам
 				val scenePoint = javafx.geometry.Point2D(event.sceneX, event.sceneY)
 				val panePoint = contentPane.sceneToLocal(scenePoint)
-				showBlockCreationMenu(event.screenX, event.screenY, panePoint.x, panePoint.y)
+//				showBlockCreationMenu(event.screenX, event.screenY, panePoint.x, panePoint.y)
 				event.consume()
 				val contextMenu = ContextMenu()
 				BlockType.entries.forEach { type ->
@@ -306,7 +308,7 @@ class MainApp : Application() {
 				}
 				outCircle.onMouseReleased = EventHandler { event ->
 					if (event.button == MouseButton.PRIMARY && draggingLine != null) {
-						val paneCoords = (scrollPane.content as? Pane)?.sceneToLocal(event.sceneX, event.sceneY)
+						val paneCoords = contentPane?.sceneToLocal(event.sceneX, event.sceneY)
 						val toBlockPair = blocks.asSequence().flatMap { other ->
 							other.inputCircles.mapIndexed { inputIdx, inputCircle ->
 								Triple(
@@ -316,13 +318,15 @@ class MainApp : Application() {
 								)
 							}
 						}.find { (other, inputCircle, _) ->
-							other != draggingFromBlock &&
-									inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY).let { p ->
-										val panePoint = (scrollPane.content as? Pane)?.sceneToLocal(p.x, p.y)
-										val dx = (panePoint?.x ?: 0.0) - (paneCoords?.x ?: 0.0)
-										val dy = (panePoint?.y ?: 0.0) - (paneCoords?.y ?: 0.0)
-										Math.hypot(dx, dy) <= inputCircle.radius + 4
-									}
+							if (other == draggingFromBlock) return@find false
+							val p = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
+							val panePoint = contentPane?.sceneToLocal(p.x, p.y)
+							if (panePoint == null || paneCoords == null) {
+								return@find false
+							}
+							val dx = panePoint.x - paneCoords.x
+							val dy = panePoint.y - paneCoords.y
+							Math.hypot(dx, dy) <= inputCircle.radius + 4
 						}
 						if (toBlockPair != null && paneCoords != null) {
 							val (toBlock, _, inputIdx) = toBlockPair
@@ -354,7 +358,7 @@ class MainApp : Application() {
 							draggingLine = null
 							draggingFromOutputIndex = null
 						} else {
-							(scrollPane.content as? Pane)?.children?.remove(draggingLine)
+							contentPane?.children?.remove(draggingLine)
 							draggingLine = null
 							draggingFromOutputIndex = null
 						}
@@ -507,7 +511,7 @@ class MainApp : Application() {
 					}
 				}
 
-				showBlockCreationMenu(event.screenX, event.screenY, paneX!!, paneY!!)
+//				showBlockCreationMenu(event.screenX, event.screenY, paneX!!, paneY!!)
 				event.consume()
 			}
 		}
@@ -516,71 +520,15 @@ class MainApp : Application() {
 		gridCanvas.isMouseTransparent = true
 	}
 
-	private fun showBlockCreationMenu(screenX: Double, screenY: Double, paneX: Double, paneY: Double) {
-		// Закрыть предыдущее меню, если оно есть
-		activeContextMenu?.hide()
-
-		val menu = ContextMenu()
-		val items = listOf(
-			MenuItem("Mapping (Groovy)").apply { setOnAction { addBlockAt(BlockType.MAPPING_GROOVY, paneX, paneY) } },
-			MenuItem("Mapping (Python)").apply { setOnAction { addBlockAt(BlockType.MAPPING_PYTHON, paneX, paneY) } },
-			MenuItem("Connector").apply { setOnAction { addBlockAt(BlockType.CONNECTOR, paneX, paneY) } },
-			MenuItem("InputData").apply { setOnAction { addBlockAt(BlockType.INPUT_DATA, paneX, paneY) } },
-			MenuItem("Start").apply { setOnAction { addBlockAt(BlockType.START, paneX, paneY) } },
-			MenuItem("Exit").apply { setOnAction { addBlockAt(BlockType.EXIT, paneX, paneY) } }
-		)
-		menu.items.addAll(items)
-		val closeMenuHandler = object : EventHandler<MouseEvent> {
-			override fun handle(event: MouseEvent) {
-				// Не скрывать, если сам клик по меню
-				if (menu.skin?.node?.contains(event.sceneX - menu.x, event.sceneY - menu.y) == true) return
-				menu.hide()
-			}
-		}
-
-		menu.setOnHidden {
-			activeContextMenu = null
-			// Снимаем глобальный фильтр, если был добавлен
-			menu.ownerWindow?.scene?.removeEventFilter(MouseEvent.MOUSE_PRESSED, closeMenuHandler)
-		}
-
-		// Показываем меню
-		menu.show(contentPane, screenX, screenY)
-		activeContextMenu = menu
-
-		// Важно! Ставим фильтр только ПОСЛЕ показа меню, иначе клик вызовет немедленное закрытие
-		Platform.runLater {
-			menu.ownerWindow?.scene?.addEventFilter(MouseEvent.MOUSE_PRESSED, closeMenuHandler)
-		}
-	}
-
-	private fun addBlockAt(type: BlockType, x: Double, y: Double) {
-		val block = BlockNode(
-			x = x,
-			y = y,
-			name = when (type) {
-				BlockType.MAPPING_GROOVY -> "Mapping (Groovy)"
-				BlockType.MAPPING_PYTHON -> "Mapping (Python)"
-				BlockType.CONNECTOR -> "Connector"
-				BlockType.INPUT_DATA -> "InputData"
-				BlockType.START -> "Start"
-				BlockType.EXIT -> "Exit"
-			},
-			blockType = type
-		)
-		contentPane?.children?.add(block)
-		blocks.add(block)
-		setupHandlersForBlock(block)
-	}
-
 
 	fun setupHandlersForBlock(block: BlockNode) {
-		block.rebuildCirclesHandlers { outIndex, outCircle ->
+		// Для каждого выходного кружка
+		block.outputCircles.forEachIndexed { outputIdx, outCircle ->
 			outCircle.onMousePressed = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY) {
 					selectBlock(block)
 					contentPane?.requestFocus()
-					val (startX, startY) = block.outputPoint(outIndex)
+					val (startX, startY) = block.outputPoint(outputIdx)
 					val line = Line(startX, startY, startX, startY).apply {
 						stroke = Color.BLUE
 						strokeWidth = 2.0
@@ -588,33 +536,38 @@ class MainApp : Application() {
 					contentPane?.children?.add(line)
 					draggingLine = line
 					draggingFromBlock = block
-					draggingFromOutputIndex = outIndex
+					draggingFromOutputIndex = outputIdx
 					event.consume()
 				}
 			}
 			outCircle.onMouseDragged = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY && draggingLine != null) {
 					val paneCoords = contentPane?.sceneToLocal(event.sceneX, event.sceneY)
-					draggingLine!!.endX = paneCoords?.x!!
-					draggingLine!!.endY = paneCoords.y
+					if (paneCoords != null) {
+						draggingLine!!.endX = paneCoords.x
+						draggingLine!!.endY = paneCoords.y
+					}
 					event.consume()
 				}
 			}
 			outCircle.onMouseReleased = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY && draggingLine != null) {
 					val paneCoords = contentPane?.sceneToLocal(event.sceneX, event.sceneY)
+					// Найти input-кружок под курсором
 					val toBlockPair = blocks.asSequence().flatMap { other ->
 						other.inputCircles.mapIndexed { inputIdx, inputCircle -> Triple(other, inputCircle, inputIdx) }
 					}.find { (other, inputCircle, _) ->
-						other != draggingFromBlock &&
-								inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY).let { p ->
-									val panePoint = contentPane?.sceneToLocal(p.x, p.y)
-									val dx = panePoint?.x?.minus(paneCoords?.x!!)
-									val dy = panePoint?.y?.minus(paneCoords!!.y)
-									Math.hypot(dx!!, dy!!) <= inputCircle.radius + 4
-								}
+						if (other == draggingFromBlock) return@find false
+						val p = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
+						val panePoint = contentPane?.sceneToLocal(p.x, p.y)
+						if (panePoint == null || paneCoords == null) {
+							return@find false
+						}
+						val dx = panePoint.x - paneCoords.x
+						val dy = panePoint.y - paneCoords.y
+						Math.hypot(dx, dy) <= inputCircle.radius + 4
 					}
-					if (toBlockPair != null) {
+					if (toBlockPair != null && paneCoords != null) {
 						val (toBlock, _, inputIdx) = toBlockPair
 						val (startX, startY) = draggingFromBlock!!.outputPoint(draggingFromOutputIndex!!)
 						val (endX, endY) = toBlock.inputPoint(inputIdx)
@@ -640,7 +593,6 @@ class MainApp : Application() {
 								event.consume()
 							}
 						}
-
 						draggingLine = null
 						draggingFromOutputIndex = null
 					} else {
