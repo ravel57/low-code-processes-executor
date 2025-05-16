@@ -1,4 +1,4 @@
-package ru.ravel.testjavafx
+package ru.ravel.testjavafx.model
 
 import javafx.scene.paint.Color
 
