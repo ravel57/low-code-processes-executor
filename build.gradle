@@ -13,17 +13,15 @@ repositories {
 	mavenCentral()
 }
 
-def javaFxVersion = '21.0.2'
-
 javafx {
-	version = javaFxVersion
+	version = '21.0.2'
 	modules = ['javafx.controls', 'javafx.fxml']
 }
 
 dependencies {
+	implementation 'org.openjfx:javafx-controls:21.0.2'
+	implementation 'org.openjfx:javafx-fxml:21.0.2'
 	implementation "org.jetbrains.kotlin:kotlin-stdlib"
-	implementation 'org.openjfx:javafx-controls:19'
-	implementation 'org.openjfx:javafx-fxml:19'
 	implementation "com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2"
 	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2"
 	implementation "org.codehaus.groovy:groovy:3.0.24"
@@ -69,6 +67,8 @@ jar {
 	}
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
+
+mainClassName = 'ru.ravel.testjavafx.MainApp'
 
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {

@@ -4,6 +4,6 @@ enum class InputFormatType {
 	JSON,
 	XML,
 	YAML,
-	ProtoBuf,
+	PROTOBUF,
 	;
 }

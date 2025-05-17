@@ -11,10 +11,7 @@ import javafx.geometry.Insets
 import javafx.geometry.Point2D
 import javafx.scene.Scene
 import javafx.scene.canvas.Canvas
-import javafx.scene.control.Button
-import javafx.scene.control.ContextMenu
-import javafx.scene.control.MenuItem
-import javafx.scene.control.ScrollPane
+import javafx.scene.control.*
 import javafx.scene.input.KeyCode
 import javafx.scene.input.MouseButton
 import javafx.scene.input.MouseEvent
@@ -80,12 +77,10 @@ class MainApp : Application() {
 			if (panning && event.button == MouseButton.MIDDLE) {
 				val dx = panLastX - event.screenX
 				val dy = panLastY - event.screenY
-				scrollPane.hvalue = (scrollPane.hvalue * (contentPane.width - scrollPane.viewportBounds.width) + dx).coerceIn(
-					0.0, contentPane.width - scrollPane.viewportBounds.width
-				) / (contentPane.width - scrollPane.viewportBounds.width)
-				scrollPane.vvalue = (scrollPane.vvalue * (contentPane.height - scrollPane.viewportBounds.height) + dy).coerceIn(
-					0.0, contentPane.height - scrollPane.viewportBounds.height
-				) / (contentPane.height - scrollPane.viewportBounds.height)
+				scrollPane.hvalue = (scrollPane.hvalue * (contentPane.width - scrollPane.viewportBounds.width) + dx)
+					.coerceIn(0.0, contentPane.width - scrollPane.viewportBounds.width) / (contentPane.width - scrollPane.viewportBounds.width)
+				scrollPane.vvalue = (scrollPane.vvalue * (contentPane.height - scrollPane.viewportBounds.height) + dy)
+					.coerceIn(0.0, contentPane.height - scrollPane.viewportBounds.height) / (contentPane.height - scrollPane.viewportBounds.height)
 				panLastX = event.screenX
 				panLastY = event.screenY
 				event.consume()
@@ -134,15 +129,6 @@ class MainApp : Application() {
 				if (file != null) exportBlocksToFile(file, asXml = false)
 			}
 		}
-		val saveXmlButton = Button("Сохранить в XML").apply {
-			setOnAction {
-				val fileChooser = FileChooser()
-				fileChooser.title = "Сохранить как XML"
-				fileChooser.extensionFilters.add(FileChooser.ExtensionFilter("XML Files", "*.xml"))
-				val file = fileChooser.showSaveDialog(primaryStage)
-				if (file != null) exportBlocksToFile(file, asXml = true)
-			}
-		}
 		val loadButton = Button("Открыть").apply {
 			setOnAction {
 				val fileChooser = FileChooser()
@@ -181,7 +167,6 @@ class MainApp : Application() {
 							outputs.forEach { (outNo, value) ->
 								block.outputs.add(outNo.replace("out", "").toInt(), value)
 							}
-							println(block.outputs)
 						}
 
 						BlockType.MAPPING_PYTHON -> {
@@ -203,7 +188,7 @@ class MainApp : Application() {
 										InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
 										InputFormatType.XML -> XmlMapper().readValue<MutableMap<String, Any>>(block.code)
 										InputFormatType.YAML -> TODO()
-										InputFormatType.ProtoBuf -> TODO()
+										InputFormatType.PROTOBUF -> TODO()
 									}
 								} catch (e: Exception) {
 									mutableMapOf()
@@ -218,7 +203,7 @@ class MainApp : Application() {
 										InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
 										InputFormatType.XML -> XmlMapper().readValue<MutableMap<String, Any>>(block.code)
 										InputFormatType.YAML -> TODO()
-										InputFormatType.ProtoBuf -> TODO()
+										InputFormatType.PROTOBUF -> TODO()
 									}
 								} catch (e: Exception) {
 									mutableMapOf()
@@ -233,7 +218,7 @@ class MainApp : Application() {
 			}
 		}
 
-		val savesButtonBox = HBox(10.0, loadButton, saveJsonButton, saveXmlButton).apply {
+		val savesButtonBox = HBox(10.0, loadButton, saveJsonButton).apply {
 			padding = Insets(8.0)
 		}
 		val runButtonBox = HBox(10.0, runButton).apply {
@@ -689,7 +674,6 @@ class MainApp : Application() {
 	companion object {
 		@JvmStatic
 		fun main(args: Array<String>) {
-//			println("""return (a + b)""".runGroovyScript(mapOf("a" to 5, "b" to 7)))
 			launch(MainApp::class.java)
 		}
 	}

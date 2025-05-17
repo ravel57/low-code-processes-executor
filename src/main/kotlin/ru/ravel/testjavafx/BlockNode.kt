@@ -1,21 +1,25 @@
 package ru.ravel.testjavafx
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.dataformat.xml.XmlMapper
+import javafx.event.EventHandler
 import javafx.geometry.Insets
 import javafx.scene.Scene
 import javafx.scene.control.*
+import javafx.scene.input.Clipboard
+import javafx.scene.input.ClipboardContent
 import javafx.scene.input.MouseButton
 import javafx.scene.layout.HBox
 import javafx.scene.layout.Pane
 import javafx.scene.layout.VBox
 import javafx.scene.paint.Color
 import javafx.scene.shape.Circle
+import javafx.scene.shape.Line
 import javafx.scene.shape.Rectangle
 import javafx.scene.text.Font
 import javafx.scene.text.Text
 import javafx.stage.Modality
 import javafx.stage.Stage
-import javafx.event.EventHandler
-import javafx.scene.shape.Line
 import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
@@ -298,7 +302,7 @@ class BlockNode(
 		// 1. Удалить соединения с недопустимыми индексами (например, если выходов стало меньше)
 		val invalidConnections = connectedLines.filter {
 			it.from == this && it.fromPort >= outputCircles.size ||
-			it.to == this && it.toPort >= inputCircles.size
+					it.to == this && it.toPort >= inputCircles.size
 		}
 		invalidConnections.forEach { conn ->
 			(scene?.window?.userData as? MainApp)?.let { app ->
@@ -373,10 +377,94 @@ class BlockNode(
 					stroke = Color.DARKRED
 					strokeWidth = 1.6
 				}
+				circle.onMouseClicked = EventHandler { event ->
+					if (event.button == MouseButton.PRIMARY && event.clickCount == 1) {
+						showOutputData(i)
+						event.consume()
+					}
+				}
 				outputCircles.add(circle)
 				children.add(circle)
 			}
 		}
+	}
+
+
+	private fun showOutputData(index: Int) {
+		val output = outputs.getOrNull(index)
+		// Если output == null, сразу отображаем
+		if (output == null) {
+			val alert = Alert(Alert.AlertType.INFORMATION, "Нет данных")
+			alert.showAndWait()
+			return
+		}
+
+		val dialog = Stage()
+		dialog.title = "Output $index"
+		dialog.initModality(Modality.APPLICATION_MODAL)
+
+		val textArea = TextArea().apply {
+			isEditable = false
+			prefWidth = 480.0
+			prefHeight = 340.0
+			font = Font.font("monospace", 14.0)
+		}
+
+		val copyBtn = Button("Скопировать в буфер").apply {
+			setOnAction {
+				val clipboard = Clipboard.getSystemClipboard()
+				val content = ClipboardContent()
+				content.putString(textArea.text)
+				clipboard.setContent(content)
+			}
+		}
+
+		// Селектор
+		val formats = InputFormatType.entries
+		val toggleGroup = ToggleGroup()
+		val radioButtons = formats.map { format ->
+			RadioButton(format.name).apply {
+				this.toggleGroup = toggleGroup
+			}
+		}
+		radioButtons[0].isSelected = true
+
+		// Горизонтальный контейнер для кнопок
+		val hBox = HBox(12.0, *radioButtons.toTypedArray()).apply {
+			padding = Insets(6.0)
+		}
+
+		// Функция для обновления содержимого textArea по выбранному формату
+		fun updateTextArea() {
+			val selected = formats[radioButtons.indexOfFirst { it.isSelected }]
+			val formatted = when (selected) {
+				InputFormatType.JSON -> {
+					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
+				}
+
+				InputFormatType.XML -> {
+					XmlMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
+				}
+
+				InputFormatType.YAML -> TODO()
+
+				InputFormatType.PROTOBUF -> TODO()
+			}
+			textArea.text = formatted
+		}
+
+		// Вешаем обработчик на переключение формата
+		radioButtons.forEach { btn ->
+			btn.setOnAction { updateTextArea() }
+		}
+
+		updateTextArea()
+
+		val vbox = VBox(10.0, hBox, textArea, copyBtn).apply {
+			padding = Insets(12.0)
+		}
+		dialog.scene = Scene(vbox)
+		dialog.showAndWait()
 	}
 
 	fun inputPoint(index: Int = 0): Pair<Double, Double> {
@@ -495,7 +583,7 @@ class BlockNode(
 						stroke = Color.BLUE
 						strokeWidth = 2.0
 					}
-					mainApp.contentPane?.children?.add(line)
+					mainApp.contentPane.children?.add(line)
 					mainApp.draggingLine = line
 					mainApp.draggingFromBlock = this
 					mainApp.draggingFromOutputIndex = i
@@ -504,7 +592,7 @@ class BlockNode(
 			}
 			circle.onMouseDragged = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY && mainApp.draggingLine != null) {
-					val paneCoords = mainApp.contentPane?.sceneToLocal(event.sceneX, event.sceneY)
+					val paneCoords = mainApp.contentPane.sceneToLocal(event.sceneX, event.sceneY)
 					if (paneCoords == null) {
 						return@EventHandler
 					}
@@ -516,7 +604,7 @@ class BlockNode(
 			circle.onMouseReleased = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY && mainApp.draggingLine != null) {
 					val paneCoords =
-						mainApp.contentPane?.sceneToLocal(event.sceneX, event.sceneY) ?: return@EventHandler
+						mainApp.contentPane.sceneToLocal(event.sceneX, event.sceneY) ?: return@EventHandler
 					mainApp.draggingLine!!.endX = paneCoords.x
 					mainApp.draggingLine!!.endY = paneCoords.y
 					val toBlockPair = mainApp.blocks.asSequence().flatMap { other ->
@@ -524,9 +612,9 @@ class BlockNode(
 					}.find { (other, inputCircle, _) ->
 						other != mainApp.draggingFromBlock &&
 								inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY).let { p ->
-									val panePoint = mainApp.contentPane?.sceneToLocal(p.x, p.y)
-									val dx = panePoint?.x?.minus(paneCoords.x!!)
-									val dy = panePoint?.y?.minus(paneCoords.y!!)
+									val panePoint = mainApp.contentPane.sceneToLocal(p.x, p.y)
+									val dx = panePoint?.x?.minus(paneCoords.x)
+									val dy = panePoint?.y?.minus(paneCoords.y)
 									Math.hypot(dx!!, dy!!) <= inputCircle.radius + 4
 								}
 					}
@@ -560,7 +648,7 @@ class BlockNode(
 						mainApp.draggingLine = null
 						mainApp.draggingFromOutputIndex = null
 					} else {
-						mainApp.contentPane?.children?.remove(mainApp.draggingLine)
+						mainApp.contentPane.children?.remove(mainApp.draggingLine)
 						mainApp.draggingLine = null
 						mainApp.draggingFromOutputIndex = null
 					}
