@@ -217,10 +217,7 @@ class BlockNode(
 			).apply {
 				padding = Insets(5.0)
 			}
-			val configTab = Tab("Конфигурация входов и выходов", configBox).apply { isClosable = false }
-
-			val tabPane = TabPane(radioTab, codeTab, configTab)
-
+			val tabPane = TabPane(radioTab, codeTab)
 			val saveButton = Button("Сохранить").apply {
 				setOnAction {
 					name = titleTextArea.text
@@ -240,55 +237,51 @@ class BlockNode(
 			dialog.scene = Scene(vbox)
 			dialog.initModality(Modality.APPLICATION_MODAL)
 			dialog.showAndWait()
-			return
-		}
-
-		// --- Для других типов (оставить старый редактор) ---
-		val codeTextArea = TextArea().apply {
-			prefWidth = 400.0
-			prefHeight = 250.0
-			text = code
-		}
-		val dataDocsTextArea = TextArea().apply {
-			prefWidth = 400.0
-			prefHeight = 250.0
-			text = dataDocs
-		}
-		// Новая вкладка
-		val inputSpinner = Spinner<Int>(1, 10, inputCount)
-		val outputSpinner = Spinner<Int>(1, 10, outputCount)
-		val configBox = VBox(
-			10.0,
-			HBox(10.0, Label("Входы:"), inputSpinner),
-			HBox(10.0, Label("Выходы:"), outputSpinner)
-		).apply {
-			padding = Insets(5.0)
-		}
-		val configTab = Tab("Конфигурация входов и выходов", configBox).apply { isClosable = false }
-
-		val codeTab = Tab("Код", codeTextArea).apply { isClosable = false }
-		val docsTab = Tab("DataDocs", dataDocsTextArea).apply { isClosable = false }
-		val tabPane = TabPane(codeTab, docsTab, configTab)
-
-		val saveButton = Button("Сохранить").apply {
-			setOnAction {
-				code = codeTextArea.text
-				dataDocs = dataDocsTextArea.text
-				name = titleTextArea.text
-				label.text = name
-				inputCount = inputSpinner.value
-				outputCount = outputSpinner.value
-				recreateIOCircles()
-				dialog.close()
+		} else {
+			// --- Для других типов (оставить старый редактор) ---
+			val codeTextArea = TextArea().apply {
+				prefWidth = 400.0
+				prefHeight = 250.0
+				text = code
 			}
+			val dataDocsTextArea = TextArea().apply {
+				prefWidth = 400.0
+				prefHeight = 250.0
+				text = dataDocs
+			}
+			// Новая вкладка
+			val inputSpinner = Spinner<Int>(1, 10, inputCount)
+			val outputSpinner = Spinner<Int>(1, 10, outputCount)
+			val configBox = VBox(
+				10.0,
+				HBox(10.0, Label("Входы:"), inputSpinner),
+				HBox(10.0, Label("Выходы:"), outputSpinner)
+			).apply {
+				padding = Insets(5.0)
+			}
+			val configTab = Tab("Конфигурация входов и выходов", configBox).apply { isClosable = false }
+			val codeTab = Tab("Код", codeTextArea).apply { isClosable = false }
+			val docsTab = Tab("DataDocs", dataDocsTextArea).apply { isClosable = false }
+			val tabPane = TabPane(codeTab, docsTab, configTab)
+			val saveButton = Button("Сохранить").apply {
+				setOnAction {
+					code = codeTextArea.text
+					dataDocs = dataDocsTextArea.text
+					name = titleTextArea.text
+					label.text = name
+					inputCount = inputSpinner.value
+					outputCount = outputSpinner.value
+					recreateIOCircles()
+					dialog.close()
+				}
+			}
+			val vbox = VBox(10.0, titleTextArea, tabPane, saveButton).apply {
+				padding = Insets(15.0)
+			}
+			dialog.scene = Scene(vbox)
+			dialog.initModality(Modality.APPLICATION_MODAL)
+			dialog.showAndWait()
 		}
-
-		val vbox = VBox(10.0, titleTextArea, tabPane, saveButton).apply {
-			padding = Insets(15.0)
-		}
-		dialog.scene = Scene(vbox)
-		dialog.initModality(Modality.APPLICATION_MODAL)
-		dialog.showAndWait()
 	}
 
 	private fun recreateIOCircles() {

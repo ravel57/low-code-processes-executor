@@ -11,7 +11,10 @@ import javafx.geometry.Insets
 import javafx.geometry.Point2D
 import javafx.scene.Scene
 import javafx.scene.canvas.Canvas
-import javafx.scene.control.*
+import javafx.scene.control.Button
+import javafx.scene.control.ContextMenu
+import javafx.scene.control.MenuItem
+import javafx.scene.control.ScrollPane
 import javafx.scene.input.KeyCode
 import javafx.scene.input.MouseButton
 import javafx.scene.input.MouseEvent
@@ -23,6 +26,10 @@ import javafx.scene.shape.Circle
 import javafx.scene.shape.Line
 import javafx.stage.FileChooser
 import javafx.stage.Stage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
@@ -142,80 +149,7 @@ class MainApp : Application() {
 		}
 
 		val runButton = Button("Бег").apply {
-			setOnAction {
-				blocks.sortedBy { block ->
-					block.x
-				}.forEach { block ->
-					when (block.blockType) {
-						BlockType.MAPPING_GROOVY -> {
-							block.outputs = mutableListOf()
-							val inputDataMap = HashMap<String, Any>()
-							block.connectedLines.filter {
-								it.to == block
-							}.forEachIndexed { index: Int, connection: Connection ->
-								inputDataMap["in${index}"] = connection.from.outputs[connection.fromPort]
-							}
-							val outputs = (0 until block.outputCount)
-								.associate { index -> "out$index" to mutableMapOf<String, Any>() }
-								.toMutableMap()
-							inputDataMap.putAll(outputs)
-							try {
-								block.code.runGroovyScript(inputDataMap)
-							} catch (e: Exception) {
-								System.err.println(e.localizedMessage)
-							}
-							outputs.forEach { (outNo, value) ->
-								block.outputs.add(outNo.replace("out", "").toInt(), value)
-							}
-						}
-
-						BlockType.MAPPING_PYTHON -> {
-							TODO()
-						}
-
-						BlockType.MAPPING_JAVA_SCRIPT -> {
-							TODO()
-						}
-
-						BlockType.CONNECTOR -> {
-							TODO()
-						}
-
-						BlockType.INPUT_DATA -> {
-							block.outputs.add(
-								try {
-									when (block.inputFormat) {
-										InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
-										InputFormatType.XML -> XmlMapper().readValue<MutableMap<String, Any>>(block.code)
-										InputFormatType.YAML -> TODO()
-										InputFormatType.PROTOBUF -> TODO()
-									}
-								} catch (e: Exception) {
-									mutableMapOf()
-								}
-							)
-						}
-
-						BlockType.START -> {
-							block.outputs.add(
-								try {
-									when (block.inputFormat) {
-										InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
-										InputFormatType.XML -> XmlMapper().readValue<MutableMap<String, Any>>(block.code)
-										InputFormatType.YAML -> TODO()
-										InputFormatType.PROTOBUF -> TODO()
-									}
-								} catch (e: Exception) {
-									mutableMapOf()
-								}
-							)
-						}
-
-						BlockType.EXIT -> {
-						}
-					}
-				}
-			}
+			setOnAction { runButtonHandler() }
 		}
 
 		val savesButtonBox = HBox(10.0, loadButton, saveJsonButton).apply {
@@ -657,6 +591,98 @@ class MainApp : Application() {
 					event.consume()
 				}
 			}
+		}
+	}
+
+
+	private fun runButtonHandler() {
+		// 1. Строим карту зависимостей
+		val incoming = mutableMapOf<BlockNode, MutableSet<BlockNode>>()
+		val outgoing = mutableMapOf<BlockNode, MutableList<BlockNode>>()
+		blocks.forEach { incoming[it] = mutableSetOf() }
+		connections.forEach { conn ->
+			incoming[conn.to]?.add(conn.from)
+			outgoing.computeIfAbsent(conn.from) { mutableListOf() }.add(conn.to)
+		}
+
+		val finished = mutableSetOf<BlockNode>()
+		val mutex = Any()
+		val scope = CoroutineScope(Dispatchers.Default)
+
+		fun tryStart(block: BlockNode) {
+			scope.launch {
+				// Ждем выполнения всех родителей
+				var ready = false
+				while (!ready) {
+					synchronized(mutex) {
+						if (incoming[block]?.all { it in finished } == true) {
+							ready = true
+						}
+					}
+					if (!ready) {
+						delay(10) // Проверяем зависимость каждые 10 мс
+					}
+				}
+
+				// ==== ЗДЕСЬ запускается вычисление блока ====
+				Platform.runLater { block.selected = true }
+				runBlockWithType(block)
+				Platform.runLater { block.selected = false }
+
+				synchronized(mutex) {
+					finished.add(block)
+				}
+				outgoing[block]?.forEach { child -> tryStart(child) }
+			}
+		}
+		// Запуск всех независимых блоков сразу
+		blocks.filter { incoming[it]?.isEmpty() == true }.forEach { tryStart(it) }
+	}
+
+
+	private fun runBlockWithType(block: BlockNode) {
+		when (block.blockType) {
+			BlockType.MAPPING_GROOVY -> {
+				block.outputs = mutableListOf()
+				val inputDataMap = HashMap<String, Any>()
+				block.connectedLines.filter {
+					it.to == block
+				}.forEachIndexed { index: Int, connection: Connection ->
+					inputDataMap["in${index}"] = connection.from.outputs[connection.fromPort]
+				}
+				val outputs = (0 until block.outputCount)
+					.associate { index -> "out$index" to mutableMapOf<String, Any>() }
+					.toMutableMap()
+				inputDataMap.putAll(outputs)
+				try {
+					block.code.runGroovyScript(inputDataMap)
+				} catch (e: Exception) {
+					System.err.println(e.localizedMessage)
+				}
+				outputs.forEach { (outNo, value) ->
+					block.outputs.add(outNo.replace("out", "").toInt(), value)
+				}
+			}
+
+			BlockType.MAPPING_PYTHON -> TODO()
+			BlockType.MAPPING_JAVA_SCRIPT -> TODO()
+			BlockType.CONNECTOR -> TODO()
+			BlockType.INPUT_DATA, BlockType.START -> {
+				block.outputs.add(
+					try {
+						when (block.inputFormat) {
+							InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
+							InputFormatType.XML -> XmlMapper().readValue<MutableMap<String, Any>>(block.code)
+							InputFormatType.YAML -> TODO()
+							InputFormatType.PROTOBUF -> TODO()
+						}
+					} catch (e: Exception) {
+						mutableMapOf()
+					}
+				)
+			}
+
+			BlockType.EXIT -> {}
 		}
 	}
 
