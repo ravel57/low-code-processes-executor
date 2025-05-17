@@ -25,6 +25,7 @@ import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
 import kotlin.math.roundToInt
 
+
 class BlockNode(
 	var x: Double,
 	var y: Double,

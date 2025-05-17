@@ -70,8 +70,9 @@ jar {
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
-mainClassName = 'ru.ravel.testjavafx.MainApp'
-
+application {
+	mainClass = 'ru.ravel.testjavafx.MainApp'
+}
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 	kotlinOptions {
