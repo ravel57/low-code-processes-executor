@@ -155,14 +155,14 @@ class MainApp : Application() {
 		val saveProjectButton = Button("Сохранить проект").apply {
 			setOnAction {
 				if (currentProjectFile != null) {
-					exportBlocksToFile(currentProjectFile!!, asXml = currentProjectFile!!.extension == "xml")
+					exportBlocksToFile(currentProjectFile!!)
 				} else {
 					val fileChooser = FileChooser()
 					fileChooser.title = "Сохранить проект"
 					fileChooser.extensionFilters.add(FileChooser.ExtensionFilter("JSON Files", "*.json"))
 					val file = fileChooser.showSaveDialog(primaryStage)
 					if (file != null) {
-						exportBlocksToFile(file, asXml = false)
+						exportBlocksToFile(file)
 						currentProjectFile = file
 					}
 				}
@@ -200,14 +200,14 @@ class MainApp : Application() {
 				// Ctrl+S для сохранения
 				if (event.isControlDown && event.code == KeyCode.S) {
 					if (currentProjectFile != null) {
-						exportBlocksToFile(currentProjectFile!!, asXml = currentProjectFile!!.extension == "xml")
+						exportBlocksToFile(currentProjectFile!!)
 					} else {
 						val fileChooser = FileChooser()
 						fileChooser.title = "Сохранить проект"
 						fileChooser.extensionFilters.add(FileChooser.ExtensionFilter("JSON Files", "*.json"))
 						val file = fileChooser.showSaveDialog(primaryStage)
 						if (file != null) {
-							exportBlocksToFile(file, asXml = false)
+							exportBlocksToFile(file)
 							currentProjectFile = file
 						}
 					}
@@ -270,11 +270,10 @@ class MainApp : Application() {
 
 	// --- Сериализация и загрузка ---
 
-	fun exportBlocksToFile(file: File, asXml: Boolean) {
+	private fun exportBlocksToFile(file: File) {
 		currentProjectFile = file
-		val mapper = if (asXml) XmlMapper() else ObjectMapper()
 		val blocksData = BlocksData(blocks.map { it.toSerialized() }, connections.map { it.toSerialized() })
-		mapper.writeValue(file, blocksData)
+		file.writeText(ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(blocksData))
 	}
 
 	private fun importBlocksFromFile(file: File) {
