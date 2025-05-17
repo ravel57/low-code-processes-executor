@@ -11,10 +11,7 @@ import javafx.geometry.Insets
 import javafx.geometry.Point2D
 import javafx.scene.Scene
 import javafx.scene.canvas.Canvas
-import javafx.scene.control.Button
-import javafx.scene.control.ContextMenu
-import javafx.scene.control.MenuItem
-import javafx.scene.control.ScrollPane
+import javafx.scene.control.*
 import javafx.scene.input.KeyCode
 import javafx.scene.input.MouseButton
 import javafx.scene.input.MouseEvent
@@ -38,6 +35,7 @@ import java.io.File
 
 
 class MainApp : Application() {
+	private var currentProjectFile: File? = null
 	val blocks = mutableListOf<BlockNode>()
 	val connections = mutableListOf<Connection>()
 	var draggingLine: Line? = null
@@ -127,32 +125,56 @@ class MainApp : Application() {
 			contentPane.requestFocus()
 		}
 
-		val saveJsonButton = Button("Сохранить в JSON").apply {
+		val newProjectButton = Button("Новый проект").apply {
 			setOnAction {
-				val fileChooser = FileChooser()
-				fileChooser.title = "Сохранить как JSON"
-				fileChooser.extensionFilters.add(FileChooser.ExtensionFilter("JSON Files", "*.json"))
-				val file = fileChooser.showSaveDialog(primaryStage)
-				if (file != null) exportBlocksToFile(file, asXml = false)
+				// Очищаем всё
+				blocks.clear()
+				connections.clear()
+				contentPane.children.removeIf { it is BlockNode || it is Line }
+				currentProjectFile = null
+				primaryStage.title = "Low code processes executor"
 			}
 		}
-		val loadButton = Button("Открыть").apply {
+
+		val openProjectButton = Button("Открыть проект").apply {
 			setOnAction {
 				val fileChooser = FileChooser()
-				fileChooser.title = "Открыть блок-схему"
+				fileChooser.title = "Открыть проект"
 				fileChooser.extensionFilters.addAll(
-					FileChooser.ExtensionFilter("JSON и XML", "*.json", "*.xml"),
+					FileChooser.ExtensionFilter("JSON", "*.json"),
 				)
 				val file = fileChooser.showOpenDialog(primaryStage)
-				if (file != null) importBlocksFromFile(file)
+				if (file != null) {
+					importBlocksFromFile(file)
+					currentProjectFile = file
+					primaryStage.title = currentProjectFile?.name ?: "Low code processes executor"
+				}
 			}
 		}
+
+		val saveProjectButton = Button("Сохранить проект").apply {
+			setOnAction {
+				if (currentProjectFile != null) {
+					exportBlocksToFile(currentProjectFile!!, asXml = currentProjectFile!!.extension == "xml")
+				} else {
+					val fileChooser = FileChooser()
+					fileChooser.title = "Сохранить проект"
+					fileChooser.extensionFilters.add(FileChooser.ExtensionFilter("JSON Files", "*.json"))
+					val file = fileChooser.showSaveDialog(primaryStage)
+					if (file != null) {
+						exportBlocksToFile(file, asXml = false)
+						currentProjectFile = file
+					}
+				}
+			}
+		}
+
 
 		val runButton = Button("Бег").apply {
 			setOnAction { runButtonHandler() }
 		}
 
-		val savesButtonBox = HBox(10.0, loadButton, saveJsonButton).apply {
+		val savesButtonBox = HBox(10.0, newProjectButton, openProjectButton, saveProjectButton).apply {
 			padding = Insets(8.0)
 		}
 		val runButtonBox = HBox(10.0, runButton).apply {
@@ -175,9 +197,24 @@ class MainApp : Application() {
 						selectedConnection = null
 					}
 				}
+				// Ctrl+S для сохранения
+				if (event.isControlDown && event.code == KeyCode.S) {
+					if (currentProjectFile != null) {
+						exportBlocksToFile(currentProjectFile!!, asXml = currentProjectFile!!.extension == "xml")
+					} else {
+						val fileChooser = FileChooser()
+						fileChooser.title = "Сохранить проект"
+						fileChooser.extensionFilters.add(FileChooser.ExtensionFilter("JSON Files", "*.json"))
+						val file = fileChooser.showSaveDialog(primaryStage)
+						if (file != null) {
+							exportBlocksToFile(file, asXml = false)
+							currentProjectFile = file
+						}
+					}
+					event.consume()
+				}
 			}
 		}
-
 		primaryStage.scene = scene.apply {
 			addEventFilter(MouseEvent.MOUSE_PRESSED) { event ->
 				activeContextMenu?.let { menu ->
@@ -188,7 +225,7 @@ class MainApp : Application() {
 				}
 			}
 		}
-		primaryStage.title = "Блочное визуальное программирование (JavaFX Kotlin)"
+		primaryStage.title = currentProjectFile?.name ?: "Low code processes executor"
 		primaryStage.show()
 		setupContextMenu()
 		contentPane.requestFocus()
@@ -234,16 +271,16 @@ class MainApp : Application() {
 	// --- Сериализация и загрузка ---
 
 	fun exportBlocksToFile(file: File, asXml: Boolean) {
+		currentProjectFile = file
 		val mapper = if (asXml) XmlMapper() else ObjectMapper()
 		val blocksData = BlocksData(blocks.map { it.toSerialized() }, connections.map { it.toSerialized() })
 		mapper.writeValue(file, blocksData)
 	}
 
 	private fun importBlocksFromFile(file: File) {
+		currentProjectFile = file
 		updateBlocks()
-		val isXml = file.extension.equals("xml", ignoreCase = true)
-		val mapper = if (isXml) XmlMapper() else ObjectMapper()
-		val data: BlocksData = mapper.readValue(file, BlocksData::class.java)
+		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
 
 		// Очистка
 		blocks.clear()
@@ -658,6 +695,13 @@ class MainApp : Application() {
 					block.code.runGroovyScript(inputDataMap)
 				} catch (e: Exception) {
 					System.err.println(e.localizedMessage)
+					Platform.runLater {
+						Alert(Alert.AlertType.ERROR).apply {
+							title = "Ошибка"
+							contentText = e.localizedMessage
+							showAndWait()
+						}
+					}
 				}
 				outputs.forEach { (outNo, value) ->
 					block.outputs.add(outNo.replace("out", "").toInt(), value)

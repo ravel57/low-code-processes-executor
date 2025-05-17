@@ -21,13 +21,14 @@ javafx {
 dependencies {
 	implementation 'org.openjfx:javafx-controls:21.0.2'
 	implementation 'org.openjfx:javafx-fxml:21.0.2'
-	implementation "org.jetbrains.kotlin:kotlin-stdlib"
-	implementation "com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2"
-	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2"
-	implementation "org.codehaus.groovy:groovy:3.0.24"
-	implementation "org.codehaus.groovy:groovy-jsr223:3.0.24"
+	implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.23'
+	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2'
+	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2'
+	implementation 'org.codehaus.groovy:groovy:3.0.24'
+	implementation 'org.codehaus.groovy:groovy-jsr223:3.0.24'
 	implementation 'com.fasterxml.jackson.core:jackson-databind:2.19.0'
-	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1"
+	implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1'
+	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-javafx:1.8.1"
 }
 
 application {
