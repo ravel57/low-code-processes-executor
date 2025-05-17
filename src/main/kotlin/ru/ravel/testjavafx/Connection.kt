@@ -33,8 +33,8 @@ class Connection(
 	}
 
 	fun toSerialized(): ConnectionSerialized = ConnectionSerialized(
-		fromId = from.serializedId!!,
-		toId = to.serializedId!!,
+		fromId = from.serializedId,
+		toId = to.serializedId,
 		fromOutputIndex = fromPort,
 		toInputIndex = toPort
 	)

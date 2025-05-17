@@ -9,7 +9,7 @@ data class BlockSerialized @JsonCreator constructor(
 	@JsonProperty("y") val y: Double = 0.0,
 	@JsonProperty("name") val name: String = "",
 	@JsonProperty("blockType") val blockType: String = "",
-	@JsonProperty("inputFormat") val inputFormat: String? = null,
+	@JsonProperty("inputFormat") val inputFormat: InputFormatType? = null,
 	@JsonProperty("code") val code: String? = null,
 	@JsonProperty("dataDocs") val dataDocs: String? = null,
 	@JsonProperty("otherInfo") val otherInfo: String? = null,

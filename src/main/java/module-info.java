@@ -5,9 +5,11 @@ module ru.ravel.testjavafx {
 	requires com.fasterxml.jackson.kotlin;
 	requires com.fasterxml.jackson.databind;
 	requires kotlin.stdlib;
+	requires org.codehaus.groovy;
 
-	opens ru.ravel.testjavafx to javafx.fxml;
-	opens ru.ravel.testjavafx.model to com.fasterxml.jackson.databind, com.fasterxml.jackson.dataformat.xml, kotlin.reflect;
-	exports ru.ravel.testjavafx.model to com.fasterxml.jackson.databind, com.fasterxml.jackson.dataformat.xml;
+	opens ru.ravel.testjavafx;
+	opens ru.ravel.testjavafx.model;
+
+	exports ru.ravel.testjavafx.model;
 	exports ru.ravel.testjavafx;
 }

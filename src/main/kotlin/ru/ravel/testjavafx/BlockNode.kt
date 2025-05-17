@@ -18,6 +18,7 @@ import javafx.event.EventHandler
 import javafx.scene.shape.Line
 import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
+import ru.ravel.testjavafx.model.InputFormatType
 import kotlin.math.roundToInt
 
 class BlockNode(
@@ -28,24 +29,26 @@ class BlockNode(
 	var code: String = "",
 	var inputCount: Int = 1,
 	var outputCount: Int = 1,
-	var serializedId: Int? = nextBlockId++,
-	var inputFormat: String = "JSON",
+	var serializedId: Int = nextBlockId++,
+	var inputFormat: InputFormatType = InputFormatType.JSON,
 	var dataDocs: String = "",
 	var otherInfo: String = "",
 ) : Pane() {
+
+	companion object {
+		var nextBlockId = 0
+	}
 
 	private val width = 100.0
 	private val height = 40.0
 	private val rect = Rectangle(width, height)
 	private val label = Text(name)
 
-	companion object {
-		private var nextBlockId = 1
-	}
-
 	// Списки для кружочков
 	val inputCircles = mutableListOf<Circle>()
 	val outputCircles = mutableListOf<Circle>()
+	var outputs = mutableListOf<MutableMap<String, Any>>()
+	val connectedLines = mutableListOf<Connection>()
 
 	var selected: Boolean = false
 		set(value) {
@@ -53,13 +56,8 @@ class BlockNode(
 			rect.fill = if (value) Color.LIGHTGREEN else blockType.color
 		}
 
-
-
-	val connectedLines = mutableListOf<Connection>()
-
 	private var dragOffsetX = 0.0
 	private var dragOffsetY = 0.0
-
 
 	init {
 		layoutX = x
@@ -184,10 +182,10 @@ class BlockNode(
 
 		if (blockType == BlockType.INPUT_DATA) {
 			// Форматы
-			val formats = listOf("JSON", "XML", "YAML", "ProtoBuf")
+			val formats = InputFormatType.entries
 			val toggleGroup = ToggleGroup()
 			val radioButtons = formats.map { format ->
-				RadioButton(format).apply {
+				RadioButton(format.name).apply {
 					this.toggleGroup = toggleGroup
 					isSelected = (format == inputFormat)
 				}
@@ -410,7 +408,7 @@ class BlockNode(
 	}
 
 	fun toSerialized(): BlockSerialized = BlockSerialized(
-		id = this.serializedId!!,
+		id = this.serializedId,
 		x = this.layoutX,
 		y = this.layoutY,
 		name = this.name,
@@ -491,7 +489,7 @@ class BlockNode(
 			circle.onMousePressed = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY) {
 					mainApp.selectBlock(this)
-					mainApp.contentPane?.requestFocus()
+					mainApp.contentPane.requestFocus()
 					val (startX, startY) = this.outputPoint(i)
 					val line = Line(startX, startY, startX, startY).apply {
 						stroke = Color.BLUE
