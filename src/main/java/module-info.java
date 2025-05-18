@@ -6,6 +6,7 @@ module ru.ravel.testjavafx {
 	requires com.fasterxml.jackson.databind;
 	requires org.codehaus.groovy;
 	requires kotlinx.coroutines.core;
+	requires org.yaml.snakeyaml;
 
 	opens ru.ravel.testjavafx;
 	opens ru.ravel.testjavafx.model;

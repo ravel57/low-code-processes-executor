@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import javafx.event.EventHandler
 import javafx.geometry.Insets
+import javafx.geometry.Pos
 import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.input.Clipboard
@@ -14,12 +15,13 @@ import javafx.scene.layout.Pane
 import javafx.scene.layout.VBox
 import javafx.scene.paint.Color
 import javafx.scene.shape.Circle
-import javafx.scene.shape.Line
 import javafx.scene.shape.Rectangle
 import javafx.scene.text.Font
 import javafx.scene.text.Text
 import javafx.stage.Modality
 import javafx.stage.Stage
+import org.yaml.snakeyaml.DumperOptions
+import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
@@ -48,21 +50,21 @@ class BlockNode(
 	private val height = 40.0
 	private val rect = Rectangle(width, height)
 	private val label = Text(name)
-
-	// Списки для кружочков
 	val inputCircles = mutableListOf<Circle>()
 	val outputCircles = mutableListOf<Circle>()
 	var outputs = mutableListOf<MutableMap<String, Any>>()
 	val connectedLines = mutableListOf<Connection>()
+	var inputNames: MutableList<String> = MutableList(inputCount) { "in${it}" }
+	var outputNames: MutableList<String> = MutableList(outputCount) { "out${it}" }
+	private var dragOffsetX = 0.0
+	private var dragOffsetY = 0.0
+
 
 	var selected: Boolean = false
 		set(value) {
 			field = value
 			rect.fill = if (value) Color.LIGHTGREEN else blockType.color
 		}
-
-	private var dragOffsetX = 0.0
-	private var dragOffsetY = 0.0
 
 	init {
 		layoutX = x
@@ -175,7 +177,7 @@ class BlockNode(
 		alert.showAndWait()
 	}
 
-	fun showCodeEditor() {
+	private fun showCodeEditor() {
 		val dialog = Stage()
 		dialog.title = "Редактор блока \"$name\""
 
@@ -211,13 +213,6 @@ class BlockNode(
 			// Конфиг входов/выходов
 			val inputSpinner = Spinner<Int>(1, 10, inputCount)
 			val outputSpinner = Spinner<Int>(1, 10, outputCount)
-			val configBox = VBox(
-				10.0,
-				HBox(10.0, Label("Входы:"), inputSpinner),
-				HBox(10.0, Label("Выходы:"), outputSpinner)
-			).apply {
-				padding = Insets(5.0)
-			}
 			val tabPane = TabPane(radioTab, codeTab)
 			val saveButton = Button("Сохранить").apply {
 				setOnAction {
@@ -251,27 +246,42 @@ class BlockNode(
 				text = dataDocs
 			}
 			// Новая вкладка
-			val inputSpinner = Spinner<Int>(1, 10, inputCount)
-			val outputSpinner = Spinner<Int>(1, 10, outputCount)
-			val configBox = VBox(
-				10.0,
-				HBox(10.0, Label("Входы:"), inputSpinner),
-				HBox(10.0, Label("Выходы:"), outputSpinner)
-			).apply {
+			val editableInputsBox = buildEditableInputsBox()
+			val editableOutputsBox = buildEditableOutputsBox()
+			val configBox = VBox(10.0, editableInputsBox, editableOutputsBox).apply {
 				padding = Insets(5.0)
 			}
 			val configTab = Tab("Конфигурация входов и выходов", configBox).apply { isClosable = false }
+
 			val codeTab = Tab("Код", codeTextArea).apply { isClosable = false }
 			val docsTab = Tab("DataDocs", dataDocsTextArea).apply { isClosable = false }
 			val tabPane = TabPane(codeTab, docsTab, configTab)
 			val saveButton = Button("Сохранить").apply {
 				setOnAction {
+					val newInputNames = mutableListOf<String>()
+					val scrollPane = editableInputsBox.children[1] as ScrollPane
+					val rowsBox = scrollPane.content as VBox
+					for (row in rowsBox.children) {
+						val box = row as HBox
+						val tf = box.children[0] as TextField
+						newInputNames.add(tf.text)
+					}
+					inputNames = newInputNames
+					inputCount = newInputNames.size
+					val newOutputNames = mutableListOf<String>()
+					val outputsScrollPane = editableOutputsBox.children[1] as ScrollPane
+					val outputsRowsBox = outputsScrollPane.content as VBox
+					for (row in outputsRowsBox.children) {
+						val box = row as HBox
+						val tf = box.children[0] as TextField
+						newOutputNames.add(tf.text)
+					}
+					outputNames = newOutputNames
+					outputCount = newOutputNames.size
 					code = codeTextArea.text
 					dataDocs = dataDocsTextArea.text
 					name = titleTextArea.text
 					label.text = name
-					inputCount = inputSpinner.value
-					outputCount = outputSpinner.value
 					recreateIOCircles()
 					dialog.close()
 				}
@@ -284,6 +294,90 @@ class BlockNode(
 			dialog.showAndWait()
 		}
 	}
+
+	private fun buildEditableInputsBox(): VBox {
+		val inputsBox = VBox(4.0)
+		val scrollContent = VBox(4.0)
+		val scrollPane = ScrollPane(scrollContent).apply {
+			prefHeight = 180.0
+			isFitToWidth = true
+			vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
+		}
+
+		val addBtn = Button("+").apply {
+			setOnAction {
+				addInputRow(scrollContent)
+			}
+		}
+		val header = HBox(6.0, Label("Входы:"), addBtn)
+		inputsBox.children.add(header)
+		inputsBox.children.add(scrollPane)
+		inputNames.forEach { name ->
+			addInputRow(scrollContent, name)
+		}
+		if (scrollContent.children.isEmpty()) {
+			addInputRow(scrollContent)
+		}
+		return inputsBox
+	}
+
+	private fun addInputRow(container: VBox, initialText: String = "") {
+		val defaultName = if (initialText.isEmpty()) "in${container.children.size}" else initialText
+		val tf = TextField(defaultName)
+		lateinit var box: HBox
+		val delBtn = Button("–").apply {
+			setOnAction {
+				if (container.children.size > 1) {
+					container.children.remove(box)
+				}
+			}
+		}
+		box = HBox(6.0, tf, delBtn)
+		box.alignment = Pos.CENTER_LEFT
+		container.children.add(box)
+	}
+
+	private fun buildEditableOutputsBox(): VBox {
+		val outputsBox = VBox(4.0)
+		val scrollContent = VBox(4.0)
+		val scrollPane = ScrollPane(scrollContent).apply {
+			prefHeight = 180.0
+			isFitToWidth = true
+			vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
+		}
+		val addBtn = Button("+").apply {
+			setOnAction {
+				addOutputRow(scrollContent)
+			}
+		}
+		val header = HBox(6.0, Label("Выходы:"), addBtn)
+		outputsBox.children.add(header)
+		outputsBox.children.add(scrollPane)
+		outputNames.forEach { name ->
+			addOutputRow(scrollContent, name)
+		}
+		if (scrollContent.children.isEmpty()) {
+			addOutputRow(scrollContent)
+		}
+		return outputsBox
+	}
+
+	private fun addOutputRow(container: VBox, initialText: String = "") {
+		val defaultName = if (initialText.isEmpty()) "out${container.children.size}" else initialText
+		val tf = TextField(defaultName)
+		lateinit var box: HBox
+		val delBtn = Button("–").apply {
+			setOnAction {
+				if (container.children.size > 1) {
+					container.children.remove(box)
+				}
+			}
+		}
+		box = HBox(6.0, tf, delBtn)
+		box.alignment = Pos.CENTER_LEFT
+		container.children.add(box)
+	}
+
 
 	private fun recreateIOCircles() {
 		// Удалить старые кружки
@@ -386,24 +480,19 @@ class BlockNode(
 
 	private fun showOutputData(index: Int) {
 		val output = outputs.getOrNull(index)
-		// Если output == null, сразу отображаем
 		if (output == null) {
 			val alert = Alert(Alert.AlertType.INFORMATION, "Нет данных")
 			alert.showAndWait()
 			return
 		}
-
 		val dialog = Stage()
 		dialog.title = "Output $index"
-		dialog.initModality(Modality.APPLICATION_MODAL)
-
 		val textArea = TextArea().apply {
 			isEditable = false
 			prefWidth = 480.0
 			prefHeight = 340.0
 			font = Font.font("monospace", 14.0)
 		}
-
 		val copyBtn = Button("Скопировать в буфер").apply {
 			setOnAction {
 				val clipboard = Clipboard.getSystemClipboard()
@@ -412,8 +501,6 @@ class BlockNode(
 				clipboard.setContent(content)
 			}
 		}
-
-		// Селектор
 		val formats = InputFormatType.entries
 		val toggleGroup = ToggleGroup()
 		val radioButtons = formats.map { format ->
@@ -422,43 +509,39 @@ class BlockNode(
 			}
 		}
 		radioButtons[0].isSelected = true
-
-		// Горизонтальный контейнер для кнопок
 		val hBox = HBox(12.0, *radioButtons.toTypedArray()).apply {
 			padding = Insets(6.0)
 		}
 
-		// Функция для обновления содержимого textArea по выбранному формату
 		fun updateTextArea() {
 			val selected = formats[radioButtons.indexOfFirst { it.isSelected }]
 			val formatted = when (selected) {
-				InputFormatType.JSON -> {
-					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
+				InputFormatType.JSON -> ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
+				InputFormatType.XML -> XmlMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
+				InputFormatType.YAML -> {
+					val options = DumperOptions().apply {
+						defaultFlowStyle = DumperOptions.FlowStyle.BLOCK
+						isPrettyFlow = true
+						indent = 2
+						defaultScalarStyle = DumperOptions.ScalarStyle.PLAIN
+					}
+					val yaml = Yaml(options)
+					yaml.dump(output)
 				}
-
-				InputFormatType.XML -> {
-					XmlMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
-				}
-
-				InputFormatType.YAML -> TODO()
 
 				InputFormatType.PROTOBUF -> TODO()
 			}
 			textArea.text = formatted
 		}
-
-		// Вешаем обработчик на переключение формата
 		radioButtons.forEach { btn ->
 			btn.setOnAction { updateTextArea() }
 		}
-
 		updateTextArea()
-
 		val vbox = VBox(10.0, hBox, textArea, copyBtn).apply {
 			padding = Insets(12.0)
 		}
 		dialog.scene = Scene(vbox)
-		dialog.showAndWait()
+		dialog.show()
 	}
 
 	fun inputPoint(index: Int = 0): Pair<Double, Double> {
@@ -551,107 +634,6 @@ class BlockNode(
 	private fun snapToGrid(gridSize: Double = 10.0) {
 		layoutX = (layoutX / gridSize).roundToInt() * gridSize
 		layoutY = (layoutY / gridSize).roundToInt() * gridSize
-	}
-
-	fun rebuildOutputsHandlers(mainApp: MainApp) {
-		// Очистить старые выходы (если они есть)
-		this.outputCircles.forEach { out ->
-			(out.parent as? Pane)?.children?.remove(out)
-		}
-		this.outputCircles.clear()
-
-		// Пересоздать выходы
-		for (i in 0 until this.outputCount) {
-			val (x, y) = this.outputPoint(i)
-			val circle = Circle(x, y, 8.0, Color.ORANGE)
-			circle.stroke = Color.DARKRED
-			circle.strokeWidth = 2.0
-
-			// Назначить обработчики
-			circle.onMousePressed = EventHandler { event ->
-				if (event.button == MouseButton.PRIMARY) {
-					mainApp.selectBlock(this)
-					mainApp.contentPane.requestFocus()
-					val (startX, startY) = this.outputPoint(i)
-					val line = Line(startX, startY, startX, startY).apply {
-						stroke = Color.BLUE
-						strokeWidth = 2.0
-					}
-					mainApp.contentPane.children?.add(line)
-					mainApp.draggingLine = line
-					mainApp.draggingFromBlock = this
-					mainApp.draggingFromOutputIndex = i
-					event.consume()
-				}
-			}
-			circle.onMouseDragged = EventHandler { event ->
-				if (event.button == MouseButton.PRIMARY && mainApp.draggingLine != null) {
-					val paneCoords = mainApp.contentPane.sceneToLocal(event.sceneX, event.sceneY)
-					if (paneCoords == null) {
-						return@EventHandler
-					}
-					mainApp.draggingLine!!.endX = paneCoords.x
-					mainApp.draggingLine!!.endY = paneCoords.y
-					event.consume()
-				}
-			}
-			circle.onMouseReleased = EventHandler { event ->
-				if (event.button == MouseButton.PRIMARY && mainApp.draggingLine != null) {
-					val paneCoords =
-						mainApp.contentPane.sceneToLocal(event.sceneX, event.sceneY) ?: return@EventHandler
-					mainApp.draggingLine!!.endX = paneCoords.x
-					mainApp.draggingLine!!.endY = paneCoords.y
-					val toBlockPair = mainApp.blocks.asSequence().flatMap { other ->
-						other.inputCircles.mapIndexed { inputIdx, inputCircle -> Triple(other, inputCircle, inputIdx) }
-					}.find { (other, inputCircle, _) ->
-						other != mainApp.draggingFromBlock &&
-								inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY).let { p ->
-									val panePoint = mainApp.contentPane.sceneToLocal(p.x, p.y)
-									val dx = panePoint?.x?.minus(paneCoords.x)
-									val dy = panePoint?.y?.minus(paneCoords.y)
-									Math.hypot(dx!!, dy!!) <= inputCircle.radius + 4
-								}
-					}
-					if (toBlockPair != null) {
-						val (toBlock, _, inputIdx) = toBlockPair
-						val (startX, startY) = mainApp.draggingFromBlock!!.outputPoint(mainApp.draggingFromOutputIndex!!)
-						val (endX, endY) = toBlock.inputPoint(inputIdx)
-						mainApp.draggingLine!!.startX = startX
-						mainApp.draggingLine!!.startY = startY
-						mainApp.draggingLine!!.endX = endX
-						mainApp.draggingLine!!.endY = endY
-						val conn = Connection(
-							mainApp.draggingFromBlock!!,
-							toBlock,
-							mainApp.draggingLine!!,
-							mainApp.draggingFromOutputIndex!!,
-							inputIdx
-						)
-						mainApp.connections.add(conn)
-						mainApp.draggingFromBlock!!.connectedLines.add(conn)
-						toBlock.connectedLines.add(conn)
-
-						conn.line.onMouseClicked = EventHandler { event ->
-							if (event.button == MouseButton.PRIMARY) {
-								mainApp.selectConnection(conn)
-								(conn.line.parent as? Pane)?.requestFocus()
-								event.consume()
-							}
-						}
-
-						mainApp.draggingLine = null
-						mainApp.draggingFromOutputIndex = null
-					} else {
-						mainApp.contentPane.children?.remove(mainApp.draggingLine)
-						mainApp.draggingLine = null
-						mainApp.draggingFromOutputIndex = null
-					}
-					event.consume()
-				}
-			}
-			this.outputCircles.add(circle)
-			(this.parent as? Pane)?.children?.add(circle)
-		}
 	}
 
 }

@@ -32,6 +32,7 @@ import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
+import org.yaml.snakeyaml.Yaml
 
 
 class MainApp : Application() {
@@ -164,6 +165,7 @@ class MainApp : Application() {
 					if (file != null) {
 						exportBlocksToFile(file)
 						currentProjectFile = file
+						primaryStage.title = currentProjectFile?.name ?: "Low code processes executor"
 					}
 				}
 			}
@@ -662,7 +664,7 @@ class MainApp : Application() {
 
 				// ==== ЗДЕСЬ запускается вычисление блока ====
 				Platform.runLater { block.selected = true }
-				runBlockWithType(block)
+				runBlock(block)
 				Platform.runLater { block.selected = false }
 
 				synchronized(mutex) {
@@ -676,7 +678,7 @@ class MainApp : Application() {
 	}
 
 
-	private fun runBlockWithType(block: BlockNode) {
+	private fun runBlock(block: BlockNode) {
 		when (block.blockType) {
 			BlockType.MAPPING_GROOVY -> {
 				block.outputs = mutableListOf()
@@ -684,10 +686,10 @@ class MainApp : Application() {
 				block.connectedLines.filter {
 					it.to == block
 				}.forEachIndexed { index: Int, connection: Connection ->
-					inputDataMap["in${index}"] = connection.from.outputs[connection.fromPort]
+					inputDataMap[block.inputNames[index]] = connection.from.outputs[connection.fromPort]
 				}
 				val outputs = (0 until block.outputCount)
-					.associate { index -> "out$index" to mutableMapOf<String, Any>() }
+					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
 					.toMutableMap()
 				inputDataMap.putAll(outputs)
 				try {
@@ -702,8 +704,8 @@ class MainApp : Application() {
 						}
 					}
 				}
-				outputs.forEach { (outNo, value) ->
-					block.outputs.add(outNo.replace("out", "").toInt(), value)
+				outputs.forEach { (_, value) ->
+					block.outputs.add(value)
 				}
 			}
 
@@ -716,7 +718,7 @@ class MainApp : Application() {
 						when (block.inputFormat) {
 							InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
 							InputFormatType.XML -> XmlMapper().readValue<MutableMap<String, Any>>(block.code)
-							InputFormatType.YAML -> TODO()
+							InputFormatType.YAML -> Yaml().load(block.code)
 							InputFormatType.PROTOBUF -> TODO()
 						}
 					} catch (e: Exception) {
