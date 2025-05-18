@@ -15,4 +15,6 @@ data class BlockSerialized @JsonCreator constructor(
 	@JsonProperty("otherInfo") val otherInfo: String? = null,
 	@JsonProperty("inputCount") val inputCount: Int = 1,
 	@JsonProperty("outputCount") val outputCount: Int = 1,
+	@JsonProperty("inputNames") val inputNames: List<String>? = null,
+	@JsonProperty("outputNames") val outputNames: List<String>? = null,
 )

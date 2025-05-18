@@ -40,13 +40,15 @@ class BlockNode(
 	var inputFormat: InputFormatType = InputFormatType.JSON,
 	var dataDocs: String = "",
 	var otherInfo: String = "",
+	var inputNames: MutableList<String> = MutableList(inputCount) { "in${it}" },
+	var outputNames: MutableList<String> = MutableList(outputCount) { "out${it}" },
 ) : Pane() {
 
 	companion object {
 		var nextBlockId = 0
 	}
 
-	private val width = 100.0
+	private val width = 150.0
 	private val height = 40.0
 	private val rect = Rectangle(width, height)
 	private val label = Text(name)
@@ -54,8 +56,6 @@ class BlockNode(
 	val outputCircles = mutableListOf<Circle>()
 	var outputs = mutableListOf<MutableMap<String, Any>>()
 	val connectedLines = mutableListOf<Connection>()
-	var inputNames: MutableList<String> = MutableList(inputCount) { "in${it}" }
-	var outputNames: MutableList<String> = MutableList(outputCount) { "out${it}" }
 	private var dragOffsetX = 0.0
 	private var dragOffsetY = 0.0
 
@@ -583,7 +583,9 @@ class BlockNode(
 		dataDocs = this.dataDocs,
 		otherInfo = this.otherInfo,
 		inputCount = this.inputCount,
-		outputCount = this.outputCount
+		outputCount = this.outputCount,
+		inputNames = this.inputNames.toList(),
+		outputNames = this.outputNames.toList(),
 	)
 
 	fun updateOutputs() {

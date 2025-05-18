@@ -314,6 +314,8 @@ class MainApp : Application() {
 				code = b.code ?: "",
 				dataDocs = b.dataDocs ?: "",
 				otherInfo = b.otherInfo ?: "",
+				inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
+				outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
 			)
 			blocks.add(block)
 			idToBlock[b.id] = block
