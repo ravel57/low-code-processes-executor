@@ -8,7 +8,7 @@ import javafx.application.Application
 import javafx.application.Platform
 import javafx.event.EventHandler
 import javafx.geometry.Insets
-import javafx.geometry.Point2D
+import javafx.scene.Group
 import javafx.scene.Scene
 import javafx.scene.canvas.Canvas
 import javafx.scene.control.*
@@ -27,31 +27,32 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
-import org.yaml.snakeyaml.Yaml
 
 
 class MainApp : Application() {
 	private var currentProjectFile: File? = null
-	val blocks = mutableListOf<BlockNode>()
+	private val blocks = mutableListOf<BlockNode>()
 	val connections = mutableListOf<Connection>()
-	var draggingLine: Line? = null
-	var draggingFromBlock: BlockNode? = null
-	var draggingFromOutputIndex: Int? = null
+	private var draggingLine: Line? = null
+	private var draggingFromBlock: BlockNode? = null
+	private var draggingFromOutputIndex: Int? = null
 	private var selectedBlock: BlockNode? = null
 	private var selectedConnection: Connection? = null
 	private var activeContextMenu: ContextMenu? = null
-	private val windowW = 2000.0
-	private val windowH = 1200.0
-	private val gridCanvas = Canvas(2000.0, 1200.0)
-	val contentPane = Pane().apply {
-		children.add(gridCanvas)
-		prefWidth = windowW * 3
-		prefHeight = windowH * 3
+	private val windowW = 800.0
+	private val windowH = 600.0
+	private val gridCanvas = Canvas(windowW, windowH)
+	private val workspaceGroup = Group()
+	private val contentPane = Pane().apply {
+		children.setAll(gridCanvas, workspaceGroup)
+		prefWidth = windowW * 2
+		prefHeight = windowH * 2
 		padding = Insets(10.0)
 		isFocusTraversable = true
 	}
@@ -60,10 +61,17 @@ class MainApp : Application() {
 		hbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
 		vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
 	}
+	private var lastEnsureVisible = 0L
 
 
 	override fun start(primaryStage: Stage) {
 		drawGrid(gridCanvas, 10.0)
+		gridCanvas.widthProperty().bind(contentPane.widthProperty())
+		gridCanvas.heightProperty().bind(contentPane.heightProperty())
+
+		gridCanvas.widthProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
+		gridCanvas.heightProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
+
 		primaryStage.userData = this
 
 		// ПАНОРАМИРОВАНИЕ мышью
@@ -115,6 +123,7 @@ class MainApp : Application() {
 					contextMenu.items.add(item)
 				}
 				contextMenu.show(contentPane, event.screenX, event.screenY)
+				activeContextMenu = contextMenu
 				event.consume()
 			}
 			if (event.button == MouseButton.PRIMARY) {
@@ -171,25 +180,27 @@ class MainApp : Application() {
 			}
 		}
 
+		val savesButtonBox = HBox(10.0, newProjectButton, openProjectButton, saveProjectButton).apply {
+			padding = Insets(8.0)
+		}
 
 		val runButton = Button("Бег").apply {
 			setOnAction { runButtonHandler() }
 		}
-
-		val savesButtonBox = HBox(10.0, newProjectButton, openProjectButton, saveProjectButton).apply {
-			padding = Insets(8.0)
+		val dataDocksButton = Button("DataDocs").apply {
+			setOnAction { }
 		}
-		val runButtonBox = HBox(10.0, runButton).apply {
+		val runButtonBox = HBox(10.0, runButton, dataDocksButton).apply {
 			padding = Insets(8.0)
 		}
 		val root = VBox(savesButtonBox, runButtonBox, scrollPane)
 
-		// Горячая клавиша DEL для удаления
+		// Горячие клавиши
 		val scene = Scene(root, windowW, windowH).apply {
 			setOnKeyPressed { event ->
-				if (event.code == KeyCode.DELETE || event.code == KeyCode.BACK_SPACE) {
+				if (event.code in arrayOf(KeyCode.DELETE, KeyCode.BACK_SPACE)) {
 					selectedBlock?.let { block ->
-						deleteBlockRequest(block)
+						deleteBlockRequest(block)    //FIXME
 					}
 					selectedConnection?.let { conn ->
 						connections.remove(conn)
@@ -218,7 +229,7 @@ class MainApp : Application() {
 			}
 		}
 		primaryStage.scene = scene.apply {
-			addEventFilter(MouseEvent.MOUSE_PRESSED) { event ->
+			addEventFilter(MouseEvent.MOUSE_PRESSED) { _ ->
 				activeContextMenu?.let { menu ->
 					if (menu.isShowing) {
 						menu.hide()
@@ -233,7 +244,7 @@ class MainApp : Application() {
 		contentPane.requestFocus()
 	}
 
-	fun selectBlock(block: BlockNode?) {
+	private fun selectBlock(block: BlockNode?) {
 		blocks.forEach { it.selected = false }
 		connections.forEach { it.selected = false }
 		selectedBlock = block
@@ -241,7 +252,7 @@ class MainApp : Application() {
 		selectedConnection = null
 	}
 
-	fun selectConnection(conn: Connection?) {
+	private fun selectConnection(conn: Connection?) {
 		connections.forEach { it.selected = false }
 		blocks.forEach { it.selected = false }
 		selectedConnection = conn
@@ -262,9 +273,10 @@ class MainApp : Application() {
 		selectedBlock = null
 	}
 
-	fun addBlock(parent: Pane, x: Double, y: Double, name: String, blockType: BlockType) {
+	private fun addBlock(parent: Pane, x: Double, y: Double, name: String, blockType: BlockType) {
 		val block = BlockNode(x, y, name, blockType)
 		blocks.add(block)
+		block.onMove = { ensureBlockVisible(block) }
 		parent.children.add(block)
 		setupHandlersForBlock(block)
 	}
@@ -316,7 +328,9 @@ class MainApp : Application() {
 				otherInfo = b.otherInfo ?: "",
 				inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
 				outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
+				outputsData = b.outputsData ?: mutableListOf(),
 			)
+			block.onMove = { ensureBlockVisible(block) }
 			blocks.add(block)
 			idToBlock[b.id] = block
 			(scrollPane.content as? Pane)?.children?.add(block)
@@ -530,20 +544,6 @@ class MainApp : Application() {
 				// Не показывать меню, если клик по блокам (BlockNode или Circle)
 				val node = event.pickResult.intersectedNode
 				if (node is BlockNode || node is Circle) return@EventHandler
-
-				// Получить координаты для добавления блока
-				val (paneX, paneY) = when (node) {
-					is Canvas -> Pair(event.x, event.y)
-					is Pane -> Pair(event.x, event.y)
-					else -> {
-						// координаты в системе contentPane
-						val scenePoint = Point2D(event.sceneX, event.sceneY)
-						val panePoint = contentPane.sceneToLocal(scenePoint)
-						Pair(panePoint?.x, panePoint?.y)
-					}
-				}
-
-//				showBlockCreationMenu(event.screenX, event.screenY, paneX!!, paneY!!)
 				event.consume()
 			}
 		}
@@ -636,22 +636,20 @@ class MainApp : Application() {
 
 
 	private fun runButtonHandler() {
-		// 1. Строим карту зависимостей
 		val incoming = mutableMapOf<BlockNode, MutableSet<BlockNode>>()
 		val outgoing = mutableMapOf<BlockNode, MutableList<BlockNode>>()
-		blocks.forEach { incoming[it] = mutableSetOf() }
+		blocks.forEach {
+			incoming[it] = mutableSetOf()
+		}
 		connections.forEach { conn ->
 			incoming[conn.to]?.add(conn.from)
 			outgoing.computeIfAbsent(conn.from) { mutableListOf() }.add(conn.to)
 		}
-
 		val finished = mutableSetOf<BlockNode>()
 		val mutex = Any()
 		val scope = CoroutineScope(Dispatchers.Default)
-
 		fun tryStart(block: BlockNode) {
 			scope.launch {
-				// Ждем выполнения всех родителей
 				var ready = false
 				while (!ready) {
 					synchronized(mutex) {
@@ -660,35 +658,31 @@ class MainApp : Application() {
 						}
 					}
 					if (!ready) {
-						delay(10) // Проверяем зависимость каждые 10 мс
+						delay(10)
 					}
 				}
-
-				// ==== ЗДЕСЬ запускается вычисление блока ====
 				Platform.runLater { block.selected = true }
 				runBlock(block)
 				Platform.runLater { block.selected = false }
-
 				synchronized(mutex) {
 					finished.add(block)
 				}
 				outgoing[block]?.forEach { child -> tryStart(child) }
 			}
 		}
-		// Запуск всех независимых блоков сразу
 		blocks.filter { incoming[it]?.isEmpty() == true }.forEach { tryStart(it) }
 	}
 
 
 	private fun runBlock(block: BlockNode) {
+		block.outputsData = mutableListOf()
 		when (block.blockType) {
 			BlockType.MAPPING_GROOVY -> {
-				block.outputs = mutableListOf()
 				val inputDataMap = HashMap<String, Any>()
 				block.connectedLines.filter {
 					it.to == block
 				}.forEachIndexed { index: Int, connection: Connection ->
-					inputDataMap[block.inputNames[index]] = connection.from.outputs[connection.fromPort]
+					inputDataMap[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
 				}
 				val outputs = (0 until block.outputCount)
 					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
@@ -707,15 +701,42 @@ class MainApp : Application() {
 					}
 				}
 				outputs.forEach { (_, value) ->
-					block.outputs.add(value)
+					block.outputsData.add(value)
 				}
 			}
 
-			BlockType.MAPPING_PYTHON -> TODO()
-			BlockType.MAPPING_JAVA_SCRIPT -> TODO()
-			BlockType.CONNECTOR -> TODO()
+			BlockType.MAPPING_PYTHON -> {
+				Platform.runLater {
+					Alert(Alert.AlertType.ERROR).apply {
+						title = "PYTHON еще не поддерживается :("
+						contentText = "PYTHON еще не поддерживается :("
+						showAndWait()
+					}
+				}
+			}
+
+			BlockType.MAPPING_JAVA_SCRIPT -> {
+				Platform.runLater {
+					Alert(Alert.AlertType.ERROR).apply {
+						title = "JAVASCRIPT еще не поддерживается :("
+						contentText = "JAVASCRIPT еще не поддерживается :("
+						showAndWait()
+					}
+				}
+			}
+
+			BlockType.CONNECTOR -> {
+				Platform.runLater {
+					Alert(Alert.AlertType.ERROR).apply {
+						title = "CONNECTOR еще не поддерживается :("
+						contentText = "CONNECTOR еще не поддерживается :("
+						showAndWait()
+					}
+				}
+			}
+
 			BlockType.INPUT_DATA, BlockType.START -> {
-				block.outputs.add(
+				block.outputsData.add(
 					try {
 						when (block.inputFormat) {
 							InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
@@ -730,6 +751,55 @@ class MainApp : Application() {
 			}
 
 			BlockType.EXIT -> {}
+		}
+	}
+
+
+	private fun ensureBlockVisible(block: BlockNode, margin: Double = 80.0, extendStep: Double = 200.0) {
+		val now = System.currentTimeMillis()
+		if (now - lastEnsureVisible < 180) return
+		lastEnsureVisible = now
+
+		val right = block.layoutX + block.width
+		val bottom = block.layoutY + block.height
+		var changed = false
+
+		if (right + margin > contentPane.width) {
+			contentPane.prefWidth = contentPane.width + extendStep
+			changed = true
+		}
+		if (bottom + margin > contentPane.height) {
+			contentPane.prefHeight = contentPane.height + extendStep
+			changed = true
+		}
+		if (block.layoutX - margin < 0) {
+			val shift = extendStep
+			blocks.forEach { it.layoutX += shift }
+			connections.forEach { conn ->
+				conn.line.startX += shift
+				conn.line.endX += shift
+			}
+			contentPane.prefWidth = contentPane.width + shift
+			changed = true
+		}
+		if (block.layoutY - margin < 0) {
+			val shift = extendStep
+			blocks.forEach { it.layoutY += shift }
+			connections.forEach { conn ->
+				conn.line.startY += shift
+				conn.line.endY += shift
+			}
+			contentPane.prefHeight = contentPane.height + shift
+			changed = true
+		}
+		if (changed) {
+			gridCanvas.widthProperty().unbind()
+			gridCanvas.heightProperty().unbind()
+			gridCanvas.width = contentPane.prefWidth
+			gridCanvas.height = contentPane.prefHeight
+			gridCanvas.widthProperty().bind(contentPane.widthProperty())
+			gridCanvas.heightProperty().bind(contentPane.heightProperty())
+			drawGrid(gridCanvas)
 		}
 	}
 

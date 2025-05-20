@@ -42,6 +42,7 @@ class BlockNode(
 	var otherInfo: String = "",
 	var inputNames: MutableList<String> = MutableList(inputCount) { "in${it}" },
 	var outputNames: MutableList<String> = MutableList(outputCount) { "out${it}" },
+	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf()
 ) : Pane() {
 
 	companion object {
@@ -54,10 +55,10 @@ class BlockNode(
 	private val label = Text(name)
 	val inputCircles = mutableListOf<Circle>()
 	val outputCircles = mutableListOf<Circle>()
-	var outputs = mutableListOf<MutableMap<String, Any>>()
 	val connectedLines = mutableListOf<Connection>()
 	private var dragOffsetX = 0.0
 	private var dragOffsetY = 0.0
+	var onMove: (() -> Unit)? = null
 
 
 	var selected: Boolean = false
@@ -164,6 +165,7 @@ class BlockNode(
 			layoutX = mouseInPane.x - dragOffsetX
 			layoutY = mouseInPane.y - dragOffsetY
 			updateConnectedLines()
+			onMove?.invoke()
 			event.consume()
 		}
 	}
@@ -209,19 +211,13 @@ class BlockNode(
 				text = code
 			}
 			val codeTab = Tab("Код", codeTextArea).apply { isClosable = false }
-
-			// Конфиг входов/выходов
-			val inputSpinner = Spinner<Int>(1, 10, inputCount)
-			val outputSpinner = Spinner<Int>(1, 10, outputCount)
-			val tabPane = TabPane(radioTab, codeTab)
+			val tabPane = TabPane(codeTab, radioTab)
 			val saveButton = Button("Сохранить").apply {
 				setOnAction {
 					name = titleTextArea.text
 					label.text = name
 					inputFormat = formats[radioButtons.indexOfFirst { it.isSelected }]
 					code = codeTextArea.text
-					inputCount = inputSpinner.value
-					outputCount = outputSpinner.value
 					recreateIOCircles()
 					dialog.close()
 				}
@@ -451,6 +447,7 @@ class BlockNode(
 				val circle = Circle(0.0, y, 7.0, Color.LIGHTSKYBLUE).apply {
 					stroke = Color.DARKBLUE
 					strokeWidth = 1.6
+					Tooltip.install(this, Tooltip(inputNames[i]))
 				}
 				inputCircles.add(circle)
 				children.add(circle)
@@ -459,11 +456,12 @@ class BlockNode(
 		// Выходы
 		if (blockType != BlockType.EXIT) {
 			val step = newHeight / (outputCount + 1)
-			repeat(outputCount) { i ->
+			for (i in 0 until outputCount) {
 				val y = step * (i + 1)
 				val circle = Circle(rect.width, y, 7.0, Color.ORANGE).apply {
 					stroke = Color.DARKRED
 					strokeWidth = 1.6
+					Tooltip.install(this, Tooltip(outputNames.getOrNull(i)))
 				}
 				circle.onMouseClicked = EventHandler { event ->
 					if (event.button == MouseButton.PRIMARY && event.clickCount == 1) {
@@ -479,7 +477,7 @@ class BlockNode(
 
 
 	private fun showOutputData(index: Int) {
-		val output = outputs.getOrNull(index)
+		val output = outputsData.getOrNull(index)
 		if (output == null) {
 			val alert = Alert(Alert.AlertType.INFORMATION, "Нет данных")
 			alert.showAndWait()
@@ -586,6 +584,7 @@ class BlockNode(
 		outputCount = this.outputCount,
 		inputNames = this.inputNames.toList(),
 		outputNames = this.outputNames.toList(),
+		outputsData = outputsData,
 	)
 
 	fun updateOutputs() {

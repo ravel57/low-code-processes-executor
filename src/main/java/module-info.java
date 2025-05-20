@@ -4,7 +4,7 @@ module ru.ravel.testjavafx {
 	requires com.fasterxml.jackson.dataformat.xml;
 	requires com.fasterxml.jackson.kotlin;
 	requires com.fasterxml.jackson.databind;
-	requires org.codehaus.groovy;
+	requires org.apache.groovy;
 	requires kotlinx.coroutines.core;
 	requires org.yaml.snakeyaml;
 
