@@ -18,4 +18,5 @@ data class BlockSerialized @JsonCreator constructor(
 	@JsonProperty("inputNames") val inputNames: List<String>? = null,
 	@JsonProperty("outputNames") val outputNames: List<String>? = null,
 	@JsonProperty("outputsData") val outputsData: MutableList<MutableMap<String, Any>>? = null,
+	@JsonProperty("packagesNames") val packagesNames: MutableList<String>? = null,
 )

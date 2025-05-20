@@ -42,7 +42,8 @@ class BlockNode(
 	var otherInfo: String = "",
 	var inputNames: MutableList<String> = MutableList(inputCount) { "in${it}" },
 	var outputNames: MutableList<String> = MutableList(outputCount) { "out${it}" },
-	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf()
+	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf(),
+	var packagesNames: MutableList<String> = mutableListOf(),
 ) : Pane() {
 
 	companion object {
@@ -252,8 +253,26 @@ class BlockNode(
 			val codeTab = Tab("Код", codeTextArea).apply { isClosable = false }
 			val docsTab = Tab("DataDocs", dataDocsTextArea).apply { isClosable = false }
 			val tabPane = TabPane(codeTab, docsTab, configTab)
+			var pipPackagesBox: VBox? = null
+			if (blockType == BlockType.MAPPING_PYTHON) {
+				pipPackagesBox = buildEditablePipBox()
+				val pipTab = Tab("pip", pipPackagesBox).apply { isClosable = false }
+				tabPane.tabs.add(pipTab)
+			}
 			val saveButton = Button("Сохранить").apply {
 				setOnAction {
+					if (blockType == BlockType.MAPPING_PYTHON && pipPackagesBox != null) {
+						val scrollPane = pipPackagesBox.children[1] as ScrollPane
+						val rowsBox = scrollPane.content as VBox
+						val newPackages = mutableListOf<String>()
+						for (row in rowsBox.children) {
+							val box = row as HBox
+							val tf = box.children[0] as TextField
+							val value = tf.text.trim()
+							if (value.isNotBlank()) newPackages.add(value)
+						}
+						packagesNames = newPackages
+					}
 					val newInputNames = mutableListOf<String>()
 					val scrollPane = editableInputsBox.children[1] as ScrollPane
 					val rowsBox = scrollPane.content as VBox
@@ -585,6 +604,7 @@ class BlockNode(
 		inputNames = this.inputNames.toList(),
 		outputNames = this.outputNames.toList(),
 		outputsData = outputsData,
+		packagesNames = packagesNames,
 	)
 
 	fun updateOutputs() {
@@ -621,6 +641,42 @@ class BlockNode(
 				}
 			}
 		}
+	}
+
+
+	private fun buildEditablePipBox(): VBox {
+		val pipBox = VBox(4.0)
+		val scrollContent = VBox(4.0)
+		val scrollPane = ScrollPane(scrollContent).apply {
+			prefHeight = 140.0
+			isFitToWidth = true
+			vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
+		}
+		val addBtn = Button("+").apply {
+			setOnAction { addPipRow(scrollContent) }
+		}
+		val header = HBox(6.0, Label("pip пакеты:"), addBtn)
+		pipBox.children.add(header)
+		pipBox.children.add(scrollPane)
+		if (packagesNames.isEmpty()) {
+			addPipRow(scrollContent)
+		} else {
+			packagesNames.forEach { addPipRow(scrollContent, it) }
+		}
+		return pipBox
+	}
+
+	private fun addPipRow(container: VBox, initialText: String = "") {
+		val tf = TextField(initialText)
+		lateinit var box: HBox
+		val delBtn = Button("–").apply {
+			setOnAction {
+				container.children.remove(box)
+			}
+		}
+		box = HBox(6.0, tf, delBtn)
+		box.alignment = Pos.CENTER_LEFT
+		container.children.add(box)
 	}
 
 

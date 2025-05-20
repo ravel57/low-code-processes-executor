@@ -7,6 +7,7 @@ module ru.ravel.testjavafx {
 	requires org.apache.groovy;
 	requires kotlinx.coroutines.core;
 	requires org.yaml.snakeyaml;
+	requires java.scripting;
 
 	opens ru.ravel.testjavafx;
 	opens ru.ravel.testjavafx.model;

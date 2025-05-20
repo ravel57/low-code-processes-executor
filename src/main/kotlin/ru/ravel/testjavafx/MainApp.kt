@@ -33,6 +33,7 @@ import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
+import javax.script.ScriptEngineManager
 
 
 class MainApp : Application() {
@@ -308,19 +309,23 @@ class MainApp : Application() {
 			} catch (_: Exception) {
 				BlockType.MAPPING_GROOVY
 			}
-			val defaultInput = if (blockType == BlockType.START || blockType == BlockType.INPUT_DATA) {
+			val defaultInputCount = if (blockType in arrayOf(BlockType.START, BlockType.INPUT_DATA)) {
 				0
 			} else {
 				b.inputCount.coerceAtLeast(1)
 			}
-			val defaultOutput = if (blockType == BlockType.EXIT) 0 else b.outputCount.coerceAtLeast(1)
+			val defaultOutputCount = if (blockType == BlockType.EXIT) {
+				0
+			} else {
+				b.outputCount.coerceAtLeast(1)
+			}
 			val block = BlockNode(
 				x = b.x,
 				y = b.y,
 				name = b.name,
 				blockType = blockType,
-				inputCount = defaultInput,
-				outputCount = defaultOutput,
+				inputCount = defaultInputCount,
+				outputCount = defaultOutputCount,
 				serializedId = b.id,
 				inputFormat = b.inputFormat ?: InputFormatType.JSON,
 				code = b.code ?: "",
@@ -329,6 +334,7 @@ class MainApp : Application() {
 				inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
 				outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
 				outputsData = b.outputsData ?: mutableListOf(),
+				packagesNames = b.packagesNames ?: mutableListOf(),
 			)
 			block.onMove = { ensureBlockVisible(block) }
 			blocks.add(block)
@@ -364,23 +370,24 @@ class MainApp : Application() {
 				outCircle.onMouseReleased = EventHandler { event ->
 					if (event.button == MouseButton.PRIMARY && draggingLine != null) {
 						val paneCoords = contentPane.sceneToLocal(event.sceneX, event.sceneY)
-						val toBlockPair = blocks.asSequence().flatMap { other ->
-							other.inputCircles.mapIndexed { inputIdx, inputCircle ->
-								Triple(
-									other, inputCircle, inputIdx
-								)
+						val toBlockPair = blocks.asSequence()
+							.flatMap { other ->
+								other.inputCircles.mapIndexed { inputIdx, inputCircle ->
+									Triple(
+										other, inputCircle, inputIdx
+									)
+								}
+							}.find { (other, inputCircle, _) ->
+								if (other == draggingFromBlock) return@find false
+								val p = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
+								val panePoint = contentPane.sceneToLocal(p.x, p.y)
+								if (panePoint == null || paneCoords == null) {
+									return@find false
+								}
+								val dx = panePoint.x - paneCoords.x
+								val dy = panePoint.y - paneCoords.y
+								Math.hypot(dx, dy) <= inputCircle.radius + 4
 							}
-						}.find { (other, inputCircle, _) ->
-							if (other == draggingFromBlock) return@find false
-							val p = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
-							val panePoint = contentPane.sceneToLocal(p.x, p.y)
-							if (panePoint == null || paneCoords == null) {
-								return@find false
-							}
-							val dx = panePoint.x - paneCoords.x
-							val dy = panePoint.y - paneCoords.y
-							Math.hypot(dx, dy) <= inputCircle.radius + 4
-						}
 						if (toBlockPair != null && paneCoords != null) {
 							val (toBlock, _, inputIdx) = toBlockPair
 							val (startX, startY) = draggingFromBlock!!.outputPoint(draggingFromOutputIndex!!)
@@ -395,7 +402,6 @@ class MainApp : Application() {
 							connections.add(conn)
 							draggingFromBlock!!.connectedLines.add(conn)
 							toBlock.connectedLines.add(conn)
-
 							conn.line.onMouseClicked = EventHandler { event ->
 								if (event.button == MouseButton.PRIMARY) {
 									selectConnection(conn)
@@ -403,7 +409,6 @@ class MainApp : Application() {
 									event.consume()
 								}
 							}
-
 							draggingLine = null
 							draggingFromOutputIndex = null
 						} else {
@@ -706,22 +711,61 @@ class MainApp : Application() {
 			}
 
 			BlockType.MAPPING_PYTHON -> {
-				Platform.runLater {
-					Alert(Alert.AlertType.ERROR).apply {
-						title = "PYTHON еще не поддерживается :("
-						contentText = "PYTHON еще не поддерживается :("
-						showAndWait()
+				val inputDataMap = HashMap<String, Any>()
+				block.connectedLines.filter {
+					it.to == block
+				}.forEachIndexed { index: Int, connection: Connection ->
+					inputDataMap[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
+				}
+				val outputs = (0 until block.outputCount)
+					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
+					.toMutableMap()
+				inputDataMap.putAll(outputs)
+				try {
+					val pyOutputs = block.code.runPythonScript(block, inputDataMap, outputs)
+					block.outputNames.forEach { name ->
+						block.outputsData.add(pyOutputs[name] as? MutableMap<String, Any> ?: mutableMapOf())
 					}
+				} catch (e: Exception) {
+					System.err.println(e.localizedMessage)
+					Platform.runLater {
+						Alert(Alert.AlertType.ERROR).apply {
+							title = "Ошибка"
+							contentText = e.localizedMessage
+							showAndWait()
+						}
+					}
+				}
+				outputs.forEach { (_, value) ->
+					block.outputsData.add(value)
 				}
 			}
 
 			BlockType.MAPPING_JAVA_SCRIPT -> {
-				Platform.runLater {
-					Alert(Alert.AlertType.ERROR).apply {
-						title = "JAVASCRIPT еще не поддерживается :("
-						contentText = "JAVASCRIPT еще не поддерживается :("
-						showAndWait()
+				val inputDataMap = HashMap<String, Any>()
+				block.connectedLines.filter {
+					it.to == block
+				}.forEachIndexed { index: Int, connection: Connection ->
+					inputDataMap[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
+				}
+				val outputs = (0 until block.outputCount)
+					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
+					.toMutableMap()
+				inputDataMap.putAll(outputs)
+				try {
+					block.code.runJavaScript(inputDataMap)
+				} catch (e: Exception) {
+					System.err.println(e.localizedMessage)
+					Platform.runLater {
+						Alert(Alert.AlertType.ERROR).apply {
+							title = "Ошибка"
+							contentText = e.localizedMessage
+							showAndWait()
+						}
 					}
+				}
+				outputs.forEach { (_, value) ->
+					block.outputsData.add(value)
 				}
 			}
 
@@ -811,6 +855,79 @@ class MainApp : Application() {
 			binding.setProperty(k, v)
 		}
 		return shell.evaluate(this)
+	}
+
+
+	private fun String.runJavaScript(bindings: Map<String, Any?> = emptyMap()): Any? {
+		val engine = ScriptEngineManager().getEngineByName("JavaScript")
+		val scriptBindings = engine.createBindings()
+		for ((k, v) in bindings) {
+			scriptBindings[k] = v
+		}
+		return engine.eval(this, scriptBindings)
+	}
+
+
+	fun String.runPythonScript(
+		block: BlockNode,
+		bindings: Map<String, Any?> = emptyMap(),
+		outputs: MutableMap<String, MutableMap<String, Any>>
+	): Map<String, Any?> {
+		val venvDir = "./run/python/${block.serializedId}_${block.hashCode()}"
+		ProcessBuilder("python3", "-m", "venv", venvDir)
+			.redirectErrorStream(true)
+			.start()
+			.waitFor()
+		val isWindows = System.getProperty("os.name").startsWith("Windows")
+		val pipPath = if (isWindows) {
+			"${venvDir}/Scripts/pip.exe"
+		} else {
+			"${venvDir}/bin/pip"
+		}
+		if (block.packagesNames.isNotEmpty()) {
+			val pipProc = ProcessBuilder(pipPath, "install", *block.packagesNames.toTypedArray())
+				.redirectErrorStream(true)
+				.start()
+			pipProc.waitFor()
+		}
+		val pythonPath = if (isWindows) {
+			"$venvDir/Scripts/python.exe"
+		} else {
+			"$venvDir/bin/python"
+		}
+		val paramsJson = ObjectMapper().writeValueAsString(bindings)
+		val fullScript = """
+				|import os, json
+				|params = json.loads(os.environ.get("PARAMS_JSON", "{}"))
+				|locals().update(params)
+				|
+				|${this}
+				|
+				|import json
+				|print(json.dumps({${outputs.map { "\"${it.key}\": ${it.key}" }.joinToString(", ")}}))
+				""".trimMargin()
+		val pythonProc = ProcessBuilder(pythonPath, "-c", fullScript)
+			.redirectErrorStream(true)
+			.apply { environment()["PARAMS_JSON"] = paramsJson }
+			.start()
+		val readText = pythonProc.inputStream.bufferedReader().readText()
+		File(venvDir).deleteRecursively()
+		val lastLine = readText.lines().lastOrNull { it.trim().startsWith("{") && it.trim().endsWith("}") }
+		val result: Map<String, Any?> = if (lastLine != null) {
+			ObjectMapper().readValue(lastLine)
+		} else {
+			if (readText.startsWith("Traceback")) {
+				Platform.runLater {
+					Alert(Alert.AlertType.ERROR).apply {
+						title = "Ошибка"
+						contentText = readText
+						showAndWait()
+					}
+				}
+			}
+			emptyMap()
+		}
+		return result
 	}
 
 
