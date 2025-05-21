@@ -57,12 +57,17 @@ class BlockNode(
 	private var dragOffsetX = 0.0
 	private var dragOffsetY = 0.0
 	var onMove: (() -> Unit)? = null
-
-
 	var selected: Boolean = false
 		set(value) {
 			field = value
-			rect.fill = if (value) Color.LIGHTGREEN else blockType.color
+			rect.stroke = if (value) Color.LIGHTGREEN else Color.DARKGRAY
+			rect.strokeWidth = if (value) 4.0 else 2.0
+		}
+	var executing: Boolean = false
+		set(value) {
+			field = value
+			rect.stroke = if (value) Color.RED else Color.DARKGRAY
+			rect.strokeWidth = if (value) 4.0 else 2.0
 		}
 
 	init {
@@ -104,9 +109,13 @@ class BlockNode(
 		label.onMouseDragged = rect.onMouseDragged
 
 		this.onMouseClicked = EventHandler { event ->
-			if (event.button == MouseButton.PRIMARY && event.clickCount == 2) {
-				showCodeEditor()
-				event.consume()
+			if (event.button == MouseButton.PRIMARY) {
+				val app = scene?.window?.userData as? MainApp
+				app?.selectBlock(this)
+				if (event.clickCount == 2) {
+					showCodeEditor()
+					event.consume()
+				}
 			}
 		}
 

@@ -246,7 +246,7 @@ class MainApp : Application() {
 		contentPane.requestFocus()
 	}
 
-	private fun selectBlock(block: BlockNode?) {
+	fun selectBlock(block: BlockNode?) {
 		blocks.forEach { it.selected = false }
 		connections.forEach { it.selected = false }
 		selectedBlock = block
@@ -654,9 +654,9 @@ class MainApp : Application() {
 						delay(10)
 					}
 				}
-				Platform.runLater { block.selected = true }
+				Platform.runLater { block.executing = true }
 				runBlock(block)
-				Platform.runLater { block.selected = false }
+				Platform.runLater { block.executing = false }
 				synchronized(mutex) {
 					finished.add(block)
 				}
