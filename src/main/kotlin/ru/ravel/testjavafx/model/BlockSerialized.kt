@@ -2,9 +2,10 @@ package ru.ravel.testjavafx.model
 
 import com.fasterxml.jackson.annotation.JsonCreator
 import com.fasterxml.jackson.annotation.JsonProperty
+import java.util.UUID
 
 data class BlockSerialized @JsonCreator constructor(
-	@JsonProperty("id") val id: Int = 0,
+	@JsonProperty("id") val id: UUID = UUID.randomUUID(),
 	@JsonProperty("x") val x: Double = 0.0,
 	@JsonProperty("y") val y: Double = 0.0,
 	@JsonProperty("name") val name: String = "",

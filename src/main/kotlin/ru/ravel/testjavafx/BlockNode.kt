@@ -25,6 +25,7 @@ import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
+import java.util.UUID
 import kotlin.math.roundToInt
 
 
@@ -36,7 +37,7 @@ class BlockNode(
 	var code: String = "",
 	var inputCount: Int = 1,
 	var outputCount: Int = 1,
-	var serializedId: Int = nextBlockId++,
+	var serializedId: UUID = UUID.randomUUID(),
 	var inputFormat: InputFormatType = InputFormatType.JSON,
 	var dataDocs: String = "",
 	var otherInfo: String = "",
@@ -45,10 +46,6 @@ class BlockNode(
 	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf(),
 	var packagesNames: MutableList<String> = mutableListOf(),
 ) : Pane() {
-
-	companion object {
-		var nextBlockId = 0
-	}
 
 	private val width = 150.0
 	private val height = 40.0
@@ -437,7 +434,6 @@ class BlockNode(
 				}
 				outCircle.onMouseReleased = javafx.event.EventHandler { event ->
 					if (event.button == MouseButton.PRIMARY) {
-						app.finishConnectionDrag(event)
 						event.consume()
 					}
 				}
@@ -636,7 +632,6 @@ class BlockNode(
 			}
 			circle.onMouseReleased = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY) {
-					(scene?.window?.userData as? MainApp)?.finishConnectionDrag(event)
 					event.consume()
 				}
 			}

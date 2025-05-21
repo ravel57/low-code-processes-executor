@@ -33,6 +33,7 @@ import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
+import java.util.UUID
 import javax.script.ScriptEngineManager
 
 
@@ -301,8 +302,7 @@ class MainApp : Application() {
 		connections.clear()
 		(scrollPane.content as? Pane)?.children?.removeIf { it is BlockNode || it is Line }
 
-		val idToBlock = mutableMapOf<Int, BlockNode>()
-		BlockNode.nextBlockId = data.blocks.maxBy(BlockSerialized::id).id + 1
+		val idToBlock = mutableMapOf<UUID, BlockNode>()
 		data.blocks.forEach { b ->
 			val blockType = try {
 				BlockType.valueOf(b.blockType)
@@ -402,11 +402,11 @@ class MainApp : Application() {
 							connections.add(conn)
 							draggingFromBlock!!.connectedLines.add(conn)
 							toBlock.connectedLines.add(conn)
-							conn.line.onMouseClicked = EventHandler { event ->
-								if (event.button == MouseButton.PRIMARY) {
+							conn.line.onMouseClicked = EventHandler { onMouseEvent ->
+								if (onMouseEvent.button == MouseButton.PRIMARY) {
 									selectConnection(conn)
 									(conn.line.parent as? Pane)?.requestFocus()
-									event.consume()
+									onMouseEvent.consume()
 								}
 							}
 							draggingLine = null
@@ -468,18 +468,6 @@ class MainApp : Application() {
 			line.endX = paneCoords.x
 			line.endY = paneCoords.y
 		}
-	}
-
-	fun finishConnectionDrag(event: MouseEvent) {
-		// Найти подходящий input и создать соединение, если на input-е
-		// Аналогично твоей логике, только теперь мы знаем outputIndex
-		draggingLine?.let { line ->
-			// ... твоя логика по поиску блока-назначения
-			// (см. ниже, если надо полный код)
-		}
-		draggingLine = null
-		draggingFromBlock = null
-		draggingFromOutputIndex = null
 	}
 
 
@@ -619,11 +607,11 @@ class MainApp : Application() {
 						draggingFromBlock!!.connectedLines.add(conn)
 						toBlock.connectedLines.add(conn)
 
-						conn.line.onMouseClicked = EventHandler { event ->
-							if (event.button == MouseButton.PRIMARY) {
+						conn.line.onMouseClicked = EventHandler { onMouseEvent ->
+							if (onMouseEvent.button == MouseButton.PRIMARY) {
 								selectConnection(conn)
 								(conn.line.parent as? Pane)?.requestFocus()
-								event.consume()
+								onMouseEvent.consume()
 							}
 						}
 						draggingLine = null
@@ -722,7 +710,7 @@ class MainApp : Application() {
 					.toMutableMap()
 				inputDataMap.putAll(outputs)
 				try {
-					val pyOutputs = block.code.runPythonScript(block, inputDataMap, outputs)
+					val pyOutputs: Map<String, Any?> = block.code.runPythonScript(block, inputDataMap, outputs)
 					block.outputNames.forEach { name ->
 						block.outputsData.add(pyOutputs[name] as? MutableMap<String, Any> ?: mutableMapOf())
 					}
@@ -903,7 +891,6 @@ class MainApp : Application() {
 				|
 				|${this}
 				|
-				|import json
 				|print(json.dumps({${outputs.map { "\"${it.key}\": ${it.key}" }.joinToString(", ")}}))
 				""".trimMargin()
 		val pythonProc = ProcessBuilder(pythonPath, "-c", fullScript)
@@ -917,13 +904,7 @@ class MainApp : Application() {
 			ObjectMapper().readValue(lastLine)
 		} else {
 			if (readText.startsWith("Traceback")) {
-				Platform.runLater {
-					Alert(Alert.AlertType.ERROR).apply {
-						title = "Ошибка"
-						contentText = readText
-						showAndWait()
-					}
-				}
+				throw RuntimeException(readText)
 			}
 			emptyMap()
 		}
