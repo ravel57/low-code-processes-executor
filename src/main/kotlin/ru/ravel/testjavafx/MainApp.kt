@@ -23,17 +23,12 @@ import javafx.scene.shape.Circle
 import javafx.scene.shape.Line
 import javafx.stage.FileChooser
 import javafx.stage.Stage
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import org.yaml.snakeyaml.Yaml
-import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
-import java.util.UUID
+import java.util.*
 import javax.script.ScriptEngineManager
 
 
@@ -639,31 +634,57 @@ class MainApp : Application() {
 			outgoing.computeIfAbsent(conn.from) { mutableListOf() }.add(conn.to)
 		}
 		val finished = mutableSetOf<BlockNode>()
-		val mutex = Any()
-		val scope = CoroutineScope(Dispatchers.Default)
-		fun tryStart(block: BlockNode) {
-			scope.launch {
-				var ready = false
-				while (!ready) {
-					synchronized(mutex) {
-						if (incoming[block]?.all { it in finished } == true) {
-							ready = true
-						}
-					}
-					if (!ready) {
-						delay(10)
-					}
+//		val repeatCount = 99 // Можно заменить на переменную, как тебе нужно
+		// Найти цикл (если есть)
+		val cycle = findFirstCycle()
+		val cycleSet = cycle?.toSet() ?: emptySet()
+
+		// Функция для стандартного обхода (без циклов)
+		fun runBlockRecursively(block: BlockNode) {
+			if (incoming[block]?.all { it in finished } != true) {
+				return
+			}
+			Platform.runLater { block.selected = true }
+			runBlock(block)
+			Platform.runLater { block.selected = false }
+			finished.add(block)
+			outgoing[block]?.forEach { child ->
+				if (child !in cycleSet) {
+					runBlockRecursively(child)
 				}
-				Platform.runLater { block.executing = true }
-				runBlock(block)
-				Platform.runLater { block.executing = false }
-				synchronized(mutex) {
-					finished.add(block)
-				}
-				outgoing[block]?.forEach { child -> tryStart(child) }
 			}
 		}
-		blocks.filter { incoming[it]?.isEmpty() == true }.forEach { tryStart(it) }
+
+		// Запускать только те, которые не входят в цикл
+		blocks.filter {
+			it !in cycleSet && incoming[it]?.all { p -> p !in cycleSet } == true
+		}.forEach {
+			runBlockRecursively(it)
+		}
+		// Если есть цикл — обходить его N раз
+		if (!cycle.isNullOrEmpty()) {
+			while (true) {
+				if (cycle.all { block ->
+						val pairs = block.connectedLines
+							.filter { it.to != block }
+							.filter { it.to in cycle }
+							.map { Pair(it.to, it.from) }
+						pairs.all { p ->
+							val to = p.first
+							val from = p.second
+							val list = List(to.connectedLines.filter { it.to == from }.size) { index -> index }
+							to.outputsData.filterIndexed { index, _ -> index in list }.all { it.isEmpty() }
+						}
+					}) {
+					break
+				}
+				for (block in cycle) {
+					Platform.runLater { block.executing = true }
+					runBlock(block)
+					Platform.runLater { block.executing = false }
+				}
+			}
+		}
 	}
 
 
@@ -687,7 +708,7 @@ class MainApp : Application() {
 					System.err.println(e.localizedMessage)
 					Platform.runLater {
 						Alert(Alert.AlertType.ERROR).apply {
-							title = "Ошибка"
+							title = block.name
 							contentText = e.localizedMessage
 							showAndWait()
 						}
@@ -833,6 +854,34 @@ class MainApp : Application() {
 			gridCanvas.heightProperty().bind(contentPane.heightProperty())
 			drawGrid(gridCanvas)
 		}
+	}
+
+
+	private fun findFirstCycle(): List<BlockNode>? {
+		val visited = mutableSetOf<BlockNode>()
+		val stack = mutableListOf<BlockNode>()
+		fun dfs(current: BlockNode): List<BlockNode>? {
+			if (current in stack) {
+				val idx = stack.indexOf(current)
+				return stack.subList(idx, stack.size).toList()
+			}
+			if (current in visited) return null
+			visited.add(current)
+			stack.add(current)
+			val nextBlocks = connections.filter { it.from == current }.map { it.to }
+			for (next in nextBlocks) {
+				val result = dfs(next)
+				if (result != null) return result
+			}
+			stack.removeAt(stack.size - 1)
+			return null
+		}
+		for (block in blocks) {
+			stack.clear()
+			val cycle = dfs(block)
+			if (!cycle.isNullOrEmpty()) return cycle
+		}
+		return null
 	}
 
 

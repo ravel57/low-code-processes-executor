@@ -196,7 +196,7 @@ class BlockNode(
 			text = name
 		}
 
-		if (blockType == BlockType.INPUT_DATA) {
+		if (blockType in arrayOf(BlockType.INPUT_DATA, BlockType.START)) {
 			// Форматы
 			val formats = InputFormatType.entries
 			val toggleGroup = ToggleGroup()
