@@ -948,23 +948,44 @@ class MainApp : Application() {
 			}
 		}
 
-		fun Value.toKotlin(): Any? = when {
-			isNull -> null
-			isBoolean -> asBoolean()
-			isNumber -> asDouble()
-			isString -> asString()
-			hasArrayElements() -> (0 until arraySize).map { getArrayElement(it).toKotlin() }
-			isHostObject -> {
-				when (val host = asHostObject<Any?>()) {
-					is Map<*, *> -> host.entries.associate { (k, v) ->
-						k.toString() to ((v as? Value)?.toKotlin() ?: v)
-					}
-
-					else -> host
-				}
+		fun Value.toKotlin(): Any? {
+			fun Any?.deepUnwrap(): Any? = when (this) {
+				is Value        -> this.toKotlin()            // раскрутить Value
+				is Map<*, *>    -> this.mapValues { (_, v) -> v.deepUnwrap() }
+					.toMutableMap()
+				is List<*>      -> this.map { it.deepUnwrap() }
+				else            -> this                       // примитивы
 			}
-			hasMembers() -> memberKeys.associateWith { getMember(it).toKotlin() }
-			else -> this
+
+			return when {
+				isNull -> null
+				isBoolean -> asBoolean()
+				isNumber -> when {
+					fitsInInt() -> asInt()
+					fitsInLong() -> asLong()
+					fitsInDouble() -> asDouble()
+					else -> asDouble()
+				}
+
+				isString -> asString()
+
+				hasArrayElements() ->
+					(0 until arraySize.toInt())
+						.map { getArrayElement(it.toLong()).deepUnwrap() }
+
+				isHostObject -> {
+					when (val host: Any? = asHostObject<Any?>()) {
+						is Map<*, *> -> host.mapValues { (_, v) -> v.deepUnwrap() }.toMutableMap()
+
+						is List<*> -> host.map { it.deepUnwrap() }
+						else -> host
+					}
+				}
+
+				hasMembers() -> memberKeys.associateWith { getMember(it).deepUnwrap() }.toMutableMap()
+
+				else -> throw RuntimeException("Unsupported Value type")
+			}
 		}
 
 		inputs.forEach { (k, v) ->
