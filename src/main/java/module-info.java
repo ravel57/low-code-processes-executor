@@ -8,6 +8,7 @@ module ru.ravel.testjavafx {
 	requires kotlinx.coroutines.core;
 	requires org.yaml.snakeyaml;
 	requires java.scripting;
+	requires org.graalvm.polyglot;
 
 	opens ru.ravel.testjavafx;
 	opens ru.ravel.testjavafx.model;

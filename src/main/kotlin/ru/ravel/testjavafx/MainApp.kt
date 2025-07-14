@@ -23,14 +23,13 @@ import javafx.scene.shape.Circle
 import javafx.scene.shape.Line
 import javafx.stage.FileChooser
 import javafx.stage.Stage
+import org.graalvm.polyglot.Context
 import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
 import java.util.*
-import javax.script.ScriptEngineManager
-
 
 class MainApp : Application() {
 	private var currentProjectFile: File? = null
@@ -89,9 +88,15 @@ class MainApp : Application() {
 				val dx = panLastX - event.screenX
 				val dy = panLastY - event.screenY
 				scrollPane.hvalue = (scrollPane.hvalue * (contentPane.width - scrollPane.viewportBounds.width) + dx)
-					.coerceIn(0.0, contentPane.width - scrollPane.viewportBounds.width) / (contentPane.width - scrollPane.viewportBounds.width)
+					.coerceIn(
+						0.0,
+						contentPane.width - scrollPane.viewportBounds.width
+					) / (contentPane.width - scrollPane.viewportBounds.width)
 				scrollPane.vvalue = (scrollPane.vvalue * (contentPane.height - scrollPane.viewportBounds.height) + dy)
-					.coerceIn(0.0, contentPane.height - scrollPane.viewportBounds.height) / (contentPane.height - scrollPane.viewportBounds.height)
+					.coerceIn(
+						0.0,
+						contentPane.height - scrollPane.viewportBounds.height
+					) / (contentPane.height - scrollPane.viewportBounds.height)
 				panLastX = event.screenX
 				panLastY = event.screenY
 				event.consume()
@@ -754,7 +759,11 @@ class MainApp : Application() {
 				block.connectedLines.filter {
 					it.to == block
 				}.forEachIndexed { index: Int, connection: Connection ->
-					inputDataMap[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
+					inputDataMap[block.inputNames[index]] = when (val v = connection.from.outputsData[connection.fromPort]) {
+						is List<*> -> v
+						null -> emptyList<Any>()
+						else -> listOf(v)
+					}
 				}
 				val outputs = (0 until block.outputCount)
 					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
@@ -895,16 +904,15 @@ class MainApp : Application() {
 
 
 	private fun String.runJavaScript(bindings: Map<String, Any?> = emptyMap()): Any? {
-		val engine = ScriptEngineManager().getEngineByName("JavaScript")
-		val scriptBindings = engine.createBindings()
-		for ((k, v) in bindings) {
-			scriptBindings[k] = v
+		val context = Context.create("js")
+		bindings.forEach { (k, v) ->
+			context.getBindings("js").putMember(k, v)
 		}
-		return engine.eval(this, scriptBindings)
+		return context.eval("js", this)
 	}
 
 
-	fun String.runPythonScript(
+	private fun String.runPythonScript(
 		block: BlockNode,
 		bindings: Map<String, Any?> = emptyMap(),
 		outputs: MutableMap<String, MutableMap<String, Any>>
