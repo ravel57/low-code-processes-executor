@@ -634,7 +634,6 @@ class MainApp : Application() {
 			outgoing.computeIfAbsent(conn.from) { mutableListOf() }.add(conn.to)
 		}
 		val finished = mutableSetOf<BlockNode>()
-//		val repeatCount = 99 // Можно заменить на переменную, как тебе нужно
 		// Найти цикл (если есть)
 		val cycle = findFirstCycle()
 		val cycleSet = cycle?.toSet() ?: emptySet()
