@@ -9,6 +9,8 @@ module ru.ravel.testjavafx {
 	requires org.yaml.snakeyaml;
 	requires java.scripting;
 	requires org.graalvm.polyglot;
+	requires org.fxmisc.richtext;
+	requires org.fxmisc.flowless;
 
 	opens ru.ravel.testjavafx;
 	opens ru.ravel.testjavafx.model;

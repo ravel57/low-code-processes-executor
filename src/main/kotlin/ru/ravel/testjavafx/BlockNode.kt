@@ -12,6 +12,7 @@ import javafx.scene.input.ClipboardContent
 import javafx.scene.input.MouseButton
 import javafx.scene.layout.HBox
 import javafx.scene.layout.Pane
+import javafx.scene.layout.Priority
 import javafx.scene.layout.VBox
 import javafx.scene.paint.Color
 import javafx.scene.shape.Circle
@@ -20,12 +21,15 @@ import javafx.scene.text.Font
 import javafx.scene.text.Text
 import javafx.stage.Modality
 import javafx.stage.Stage
+import org.fxmisc.flowless.VirtualizedScrollPane
+import org.fxmisc.richtext.CodeArea
+import org.fxmisc.richtext.LineNumberFactory
 import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
-import java.util.UUID
+import java.util.*
 import kotlin.math.roundToInt
 
 
@@ -191,9 +195,9 @@ class BlockNode(
 		dialog.title = "Редактор блока \"$name\""
 
 		val titleTextArea = TextArea().apply {
-			prefWidth = 400.0
 			prefHeight = 40.0
 			text = name
+			font = Font("Consolas", 16.0)
 		}
 
 		if (blockType in arrayOf(BlockType.INPUT_DATA, BlockType.START)) {
@@ -212,19 +216,23 @@ class BlockNode(
 			val radioTab = Tab("Формат", radiosBox).apply { isClosable = false }
 
 			// Код
-			val codeTextArea = TextArea().apply {
-				prefWidth = 400.0
-				prefHeight = 250.0
-				text = code
+			val codeArea = CodeArea().apply {
+				replaceText(code)
+				paragraphGraphicFactory = LineNumberFactory.get(this)
+				isWrapText = true
+				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
 			}
-			val codeTab = Tab("Код", codeTextArea).apply { isClosable = false }
+			val codeScroll = VirtualizedScrollPane(codeArea)
+			VBox.setVgrow(codeScroll, Priority.ALWAYS)
+			val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
 			val tabPane = TabPane(codeTab, radioTab)
+			VBox.setVgrow(tabPane, Priority.ALWAYS)
 			val saveButton = Button("Сохранить").apply {
 				setOnAction {
 					name = titleTextArea.text
 					label.text = name
 					inputFormat = formats[radioButtons.indexOfFirst { it.isSelected }]
-					code = codeTextArea.text
+					code = codeArea.text
 					recreateIOCircles()
 					dialog.close()
 				}
@@ -232,22 +240,31 @@ class BlockNode(
 
 			val vbox = VBox(10.0, titleTextArea, tabPane, saveButton).apply {
 				padding = Insets(15.0)
+				VBox.setVgrow(tabPane, Priority.ALWAYS)
 			}
-			dialog.scene = Scene(vbox)
+			dialog.scene = Scene(vbox, 720.0, 600.0)
 			dialog.initModality(Modality.APPLICATION_MODAL)
 			dialog.showAndWait()
 		} else {
 			// --- Для других типов (оставить старый редактор) ---
-			val codeTextArea = TextArea().apply {
-				prefWidth = 400.0
-				prefHeight = 250.0
-				text = code
+			val codeArea = CodeArea().apply {
+				replaceText(code)
+				paragraphGraphicFactory = LineNumberFactory.get(this)
+				isWrapText = true
+				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
 			}
-			val dataDocsTextArea = TextArea().apply {
-				prefWidth = 400.0
-				prefHeight = 250.0
-				text = dataDocs
+			val codeScroll = VirtualizedScrollPane(codeArea)
+			VBox.setVgrow(codeScroll, Priority.ALWAYS)
+
+			val dataDocsArea = CodeArea().apply {
+				replaceText(dataDocs)
+				paragraphGraphicFactory = LineNumberFactory.get(this)
+				isWrapText = true
+				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
 			}
+			val docsScroll = VirtualizedScrollPane(dataDocsArea)
+			VBox.setVgrow(docsScroll, Priority.ALWAYS)
+
 			// Новая вкладка
 			val editableInputsBox = buildEditableInputsBox()
 			val editableOutputsBox = buildEditableOutputsBox()
@@ -256,9 +273,11 @@ class BlockNode(
 			}
 			val configTab = Tab("Конфигурация входов и выходов", configBox).apply { isClosable = false }
 
-			val codeTab = Tab("Код", codeTextArea).apply { isClosable = false }
-			val docsTab = Tab("DataDocs", dataDocsTextArea).apply { isClosable = false }
+			val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
+			val docsTab = Tab("DataDocs", VBox(docsScroll)).apply { isClosable = false }
 			val tabPane = TabPane(codeTab, docsTab, configTab)
+			VBox.setVgrow(tabPane, Priority.ALWAYS)
+
 			var pipPackagesBox: VBox? = null
 			if (blockType == BlockType.MAPPING_PYTHON) {
 				pipPackagesBox = buildEditablePipBox()
@@ -299,8 +318,8 @@ class BlockNode(
 					}
 					outputNames = newOutputNames
 					outputCount = newOutputNames.size
-					code = codeTextArea.text
-					dataDocs = dataDocsTextArea.text
+					code = codeArea.text
+					dataDocs = dataDocsArea.text
 					name = titleTextArea.text
 					label.text = name
 					recreateIOCircles()
@@ -309,8 +328,9 @@ class BlockNode(
 			}
 			val vbox = VBox(10.0, titleTextArea, tabPane, saveButton).apply {
 				padding = Insets(15.0)
+				VBox.setVgrow(tabPane, Priority.ALWAYS)
 			}
-			dialog.scene = Scene(vbox)
+			dialog.scene = Scene(vbox, 720.0, 600.0)
 			dialog.initModality(Modality.APPLICATION_MODAL)
 			dialog.showAndWait()
 		}
@@ -509,17 +529,21 @@ class BlockNode(
 		}
 		val dialog = Stage()
 		dialog.title = "Output $index"
-		val textArea = TextArea().apply {
+
+		val codeArea = CodeArea().apply {
+			paragraphGraphicFactory = LineNumberFactory.get(this)
+			isWrapText = true
+			style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
 			isEditable = false
-			prefWidth = 480.0
-			prefHeight = 340.0
-			font = Font.font("monospace", 14.0)
 		}
+		val scrollPane = VirtualizedScrollPane(codeArea)
+		VBox.setVgrow(scrollPane, Priority.ALWAYS)
+
 		val copyBtn = Button("Скопировать в буфер").apply {
 			setOnAction {
 				val clipboard = Clipboard.getSystemClipboard()
 				val content = ClipboardContent()
-				content.putString(textArea.text)
+				content.putString(codeArea.text)
 				clipboard.setContent(content)
 			}
 		}
@@ -553,16 +577,19 @@ class BlockNode(
 
 				InputFormatType.PROTOBUF -> TODO()
 			}
-			textArea.text = formatted
+			codeArea.replaceText(formatted)
 		}
 		radioButtons.forEach { btn ->
 			btn.setOnAction { updateTextArea() }
 		}
 		updateTextArea()
-		val vbox = VBox(10.0, hBox, textArea, copyBtn).apply {
+		val vbox = VBox(10.0, hBox, scrollPane, copyBtn).apply {
 			padding = Insets(12.0)
+			VBox.setVgrow(scrollPane, Priority.ALWAYS)
 		}
-		dialog.scene = Scene(vbox)
+		val scene = Scene(vbox, 720.0, 540.0)
+		dialog.scene = scene
+		dialog.initModality(Modality.APPLICATION_MODAL)
 		dialog.show()
 	}
 

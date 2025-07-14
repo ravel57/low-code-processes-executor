@@ -33,7 +33,6 @@ import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
 import java.util.*
 
-private const val PYTHON_PARAMS_VARIABLE = "PARAMS_JSON"
 
 class MainApp : Application() {
 	private var currentProjectFile: File? = null
@@ -1067,6 +1066,8 @@ class MainApp : Application() {
 
 
 	companion object {
+		private const val PYTHON_PARAMS_VARIABLE = "PARAMS_JSON"
+
 		@JvmStatic
 		fun main(args: Array<String>) {
 			launch(MainApp::class.java)
