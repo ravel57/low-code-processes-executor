@@ -2,6 +2,7 @@ package ru.ravel.testjavafx
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
+import javafx.application.Platform
 import javafx.event.EventHandler
 import javafx.geometry.Insets
 import javafx.geometry.Pos
@@ -73,6 +74,7 @@ class BlockNode(
 			rect.stroke = if (value) Color.RED else Color.DARKGRAY
 			rect.strokeWidth = if (value) 4.0 else 2.0
 		}
+
 
 	init {
 		layoutX = x
@@ -169,6 +171,7 @@ class BlockNode(
 		}
 	}
 
+
 	private fun onBlockDragged(event: javafx.scene.input.MouseEvent) {
 		if (event.button == MouseButton.PRIMARY) {
 			val parentPane = parent as Pane
@@ -189,6 +192,20 @@ class BlockNode(
 		alert.contentText = message
 		alert.showAndWait()
 	}
+
+
+	private fun createCodeAreaContextMenu(codeArea: CodeArea): ContextMenu {
+		val copy = MenuItem("Копировать")
+		copy.setOnAction { codeArea.copy() }
+		val cut = MenuItem("Вырезать")
+		cut.setOnAction { codeArea.cut() }
+		val paste = MenuItem("Вставить")
+		paste.setOnAction { codeArea.paste() }
+		val selectAll = MenuItem("Выделить всё")
+		selectAll.setOnAction { codeArea.selectAll() }
+		return ContextMenu(copy, cut, paste, selectAll)
+	}
+
 
 	private fun showCodeEditor() {
 		val dialog = Stage()
@@ -220,6 +237,7 @@ class BlockNode(
 				replaceText(code)
 				paragraphGraphicFactory = LineNumberFactory.get(this)
 				isWrapText = true
+				contextMenu = createCodeAreaContextMenu(this)
 				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
 			}
 			val codeScroll = VirtualizedScrollPane(codeArea)
@@ -243,6 +261,7 @@ class BlockNode(
 				VBox.setVgrow(tabPane, Priority.ALWAYS)
 			}
 			dialog.scene = Scene(vbox, 720.0, 600.0)
+			Platform.runLater { codeArea.requestFocus() }
 			dialog.initModality(Modality.APPLICATION_MODAL)
 			dialog.showAndWait()
 		} else {
@@ -251,6 +270,7 @@ class BlockNode(
 				replaceText(code)
 				paragraphGraphicFactory = LineNumberFactory.get(this)
 				isWrapText = true
+				contextMenu = createCodeAreaContextMenu(this)
 				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
 			}
 			val codeScroll = VirtualizedScrollPane(codeArea)
@@ -331,6 +351,7 @@ class BlockNode(
 				VBox.setVgrow(tabPane, Priority.ALWAYS)
 			}
 			dialog.scene = Scene(vbox, 720.0, 600.0)
+			Platform.runLater { codeArea.requestFocus() }
 			dialog.initModality(Modality.APPLICATION_MODAL)
 			dialog.showAndWait()
 		}
@@ -533,6 +554,7 @@ class BlockNode(
 		val codeArea = CodeArea().apply {
 			paragraphGraphicFactory = LineNumberFactory.get(this)
 			isWrapText = true
+			contextMenu = createCodeAreaContextMenu(this)
 			style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
 			isEditable = false
 		}
@@ -587,8 +609,8 @@ class BlockNode(
 			padding = Insets(12.0)
 			VBox.setVgrow(scrollPane, Priority.ALWAYS)
 		}
-		val scene = Scene(vbox, 720.0, 540.0)
-		dialog.scene = scene
+		dialog.scene = Scene(vbox, 720.0, 600.0)
+		Platform.runLater { codeArea.requestFocus() }
 		dialog.initModality(Modality.APPLICATION_MODAL)
 		dialog.show()
 	}
