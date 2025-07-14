@@ -24,12 +24,16 @@ import javafx.scene.shape.Line
 import javafx.stage.FileChooser
 import javafx.stage.Stage
 import org.graalvm.polyglot.Context
+import org.graalvm.polyglot.Value
+import org.graalvm.polyglot.proxy.ProxyObject
 import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
 import java.util.*
+
+private const val PYTHON_PARAMS_VARIABLE = "PARAMS_JSON"
 
 class MainApp : Application() {
 	private var currentProjectFile: File? = null
@@ -628,6 +632,17 @@ class MainApp : Application() {
 	}
 
 
+	private fun isDataEmpty(data: Any?): Boolean {
+		return when (data) {
+			null -> true
+			is Map<*, *> -> data.isEmpty()
+			is Collection<*> -> data.isEmpty()
+			is String -> data.isEmpty()
+			else -> false
+		}
+	}
+
+
 	private fun runButtonHandler() {
 		val incoming = mutableMapOf<BlockNode, MutableSet<BlockNode>>()
 		val outgoing = mutableMapOf<BlockNode, MutableList<BlockNode>>()
@@ -643,9 +658,15 @@ class MainApp : Application() {
 		val cycle = findFirstCycle()
 		val cycleSet = cycle?.toSet() ?: emptySet()
 
-		// Функция для стандартного обхода (без циклов)
 		fun runBlockRecursively(block: BlockNode) {
-			if (incoming[block]?.all { it in finished } != true) {
+			val inputConnections = connections.filter { it.to == block }
+			val allInputsFilled = inputConnections.all { conn ->
+				val fromBlock = conn.from
+				val fromPort = conn.fromPort
+				val outputs = fromBlock.outputsData
+				outputs.size > fromPort && !isDataEmpty(outputs[fromPort])
+			}
+			if (!allInputsFilled) {
 				return
 			}
 			Platform.runLater { block.selected = true }
@@ -659,15 +680,36 @@ class MainApp : Application() {
 			}
 		}
 
-		// Запускать только те, которые не входят в цикл
 		blocks.filter {
 			it !in cycleSet && incoming[it]?.all { p -> p !in cycleSet } == true
 		}.forEach {
 			runBlockRecursively(it)
 		}
-		// Если есть цикл — обходить его N раз
 		if (!cycle.isNullOrEmpty()) {
 			while (true) {
+				// 1. Проходим все блоки цикла (ваша логика)
+				for (block in cycle) {
+					Platform.runLater { block.executing = true }
+					runBlock(block)
+					Platform.runLater { block.executing = false }
+				}
+
+				// 2. Триггерим все следующие блоки вне цикла после каждого прохода
+				val exitBlocks = mutableSetOf<BlockNode>()
+				outgoing.forEach { (from, outs) ->
+					if (from in cycleSet) {
+						outs.filter { it !in cycleSet }.forEach { exitBlocks.add(it) }
+					}
+				}
+				exitBlocks.forEach { nextBlock ->
+					// Проверяем что все входящие из цикла "готовы"
+					val fromCycle = incoming[nextBlock]?.filter { it in cycleSet } ?: emptyList()
+					if (fromCycle.all { it in finished || cycleSet.contains(it) }) {
+						runBlockRecursively(nextBlock)
+					}
+				}
+
+				// 3. Условие выхода (ваше)
 				if (cycle.all { block ->
 						val pairs = block.connectedLines
 							.filter { it.to != block }
@@ -681,11 +723,6 @@ class MainApp : Application() {
 						}
 					}) {
 					break
-				}
-				for (block in cycle) {
-					Platform.runLater { block.executing = true }
-					runBlock(block)
-					Platform.runLater { block.executing = false }
 				}
 			}
 		}
@@ -708,6 +745,9 @@ class MainApp : Application() {
 				inputDataMap.putAll(outputs)
 				try {
 					block.code.runGroovyScript(inputDataMap)
+					outputs.forEach { (_, value) ->
+						block.outputsData.add(value)
+					}
 				} catch (e: Exception) {
 					System.err.println(e.localizedMessage)
 					Platform.runLater {
@@ -717,9 +757,6 @@ class MainApp : Application() {
 							showAndWait()
 						}
 					}
-				}
-				outputs.forEach { (_, value) ->
-					block.outputsData.add(value)
 				}
 			}
 
@@ -739,6 +776,9 @@ class MainApp : Application() {
 					block.outputNames.forEach { name ->
 						block.outputsData.add(pyOutputs[name] as? MutableMap<String, Any> ?: mutableMapOf())
 					}
+					outputs.forEach { (_, value) ->
+						block.outputsData.add(value)
+					}
 				} catch (e: Exception) {
 					System.err.println(e.localizedMessage)
 					Platform.runLater {
@@ -748,29 +788,22 @@ class MainApp : Application() {
 							showAndWait()
 						}
 					}
-				}
-				outputs.forEach { (_, value) ->
-					block.outputsData.add(value)
 				}
 			}
 
 			BlockType.MAPPING_JAVA_SCRIPT -> {
-				val inputDataMap = HashMap<String, Any>()
-				block.connectedLines.filter {
-					it.to == block
-				}.forEachIndexed { index: Int, connection: Connection ->
-					inputDataMap[block.inputNames[index]] = when (val v = connection.from.outputsData[connection.fromPort]) {
-						is List<*> -> v
-						null -> emptyList<Any>()
-						else -> listOf(v)
+				val inputs = HashMap<String, Any>()
+				block.connectedLines.filter { it.to == block }
+					.forEachIndexed { index: Int, connection: Connection ->
+						inputs[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
 					}
-				}
-				val outputs = (0 until block.outputCount)
-					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
-					.toMutableMap()
-				inputDataMap.putAll(outputs)
+				val outputNames = (0 until block.outputCount)
+					.map { index -> block.outputNames[index] }
 				try {
-					block.code.runJavaScript(inputDataMap)
+					val result = block.code.runJavaScript(inputs, outputNames)
+					outputNames.forEach { name ->
+						block.outputsData.add(result[name] as? MutableMap<String, Any> ?: mutableMapOf())
+					}
 				} catch (e: Exception) {
 					System.err.println(e.localizedMessage)
 					Platform.runLater {
@@ -780,9 +813,6 @@ class MainApp : Application() {
 							showAndWait()
 						}
 					}
-				}
-				outputs.forEach { (_, value) ->
-					block.outputsData.add(value)
 				}
 			}
 
@@ -903,12 +933,53 @@ class MainApp : Application() {
 	}
 
 
-	private fun String.runJavaScript(bindings: Map<String, Any?> = emptyMap()): Any? {
-		val context = Context.create("js")
-		bindings.forEach { (k, v) ->
-			context.getBindings("js").putMember(k, v)
+	private fun String.runJavaScript(
+		inputs: Map<String, Any?> = emptyMap(),
+		outputNames: List<String> = emptyList(),
+	): Map<String, Map<String, Any?>> {
+		val context = Context.newBuilder("js").allowAllAccess(true).build()
+
+		fun Any?.toJsFriendly(ctx: Context): Any? {
+			return when (this) {
+				null -> null
+				is Map<*, *> -> this.mapValues { (_, v) -> v.toJsFriendly(ctx) }
+				is List<*> -> ctx.asValue(this.map { it.toJsFriendly(ctx) }.toTypedArray())
+				else -> this
+			}
 		}
-		return context.eval("js", this)
+
+		fun Value.toKotlin(): Any? {
+			return when {
+				this.isNull -> null
+				this.isBoolean -> asBoolean()
+				this.isNumber -> asDouble()
+				this.isString -> asString()
+				this.hasArrayElements() -> (0 until arraySize).map { getArrayElement(it).toKotlin() }
+				this.hasMembers() -> memberKeys.associateWith { getMember(it).toKotlin() }
+				else -> this
+			}
+		}
+
+		inputs.forEach { (k, v) ->
+			context.getBindings("js").putMember(k, v.toJsFriendly(context))
+		}
+		val outputs = mutableMapOf<String, MutableMap<String, Any?>>()
+		for (name in outputNames) {
+			if (inputs.containsKey(name))
+				error("Имя «$name» уже занято входным параметром")
+			val m = mutableMapOf<String, Any?>()
+			outputs[name] = m
+			context.getBindings("js")
+				.putMember(name, ProxyObject.fromMap(m))
+		}
+		context.eval("js", this).toKotlin()
+		val cleaned: Map<String, MutableMap<String, Any?>> =
+			outputs.mapValues { (_, inner) ->
+				inner.mapValues { (_, v) ->
+					if (v is Value) v.toKotlin() else v
+				}.toMutableMap()
+			}
+		return cleaned
 	}
 
 
@@ -942,7 +1013,7 @@ class MainApp : Application() {
 		val paramsJson = ObjectMapper().writeValueAsString(bindings)
 		val fullScript = """
 				|import os, json
-				|params = json.loads(os.environ.get("PARAMS_JSON", "{}"))
+				|params = json.loads(os.environ.get("$PYTHON_PARAMS_VARIABLE", "{}"))
 				|locals().update(params)
 				|
 				|${this}
@@ -951,7 +1022,7 @@ class MainApp : Application() {
 				""".trimMargin()
 		val pythonProc = ProcessBuilder(pythonPath, "-c", fullScript)
 			.redirectErrorStream(true)
-			.apply { environment()["PARAMS_JSON"] = paramsJson }
+			.apply { environment()[PYTHON_PARAMS_VARIABLE] = paramsJson }
 			.start()
 		val readText = pythonProc.inputStream.bufferedReader().readText()
 		File(venvDir).deleteRecursively()
