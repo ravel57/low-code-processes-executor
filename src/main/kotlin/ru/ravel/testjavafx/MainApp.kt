@@ -948,16 +948,23 @@ class MainApp : Application() {
 			}
 		}
 
-		fun Value.toKotlin(): Any? {
-			return when {
-				this.isNull -> null
-				this.isBoolean -> asBoolean()
-				this.isNumber -> asDouble()
-				this.isString -> asString()
-				this.hasArrayElements() -> (0 until arraySize).map { getArrayElement(it).toKotlin() }
-				this.hasMembers() -> memberKeys.associateWith { getMember(it).toKotlin() }
-				else -> this
+		fun Value.toKotlin(): Any? = when {
+			isNull -> null
+			isBoolean -> asBoolean()
+			isNumber -> asDouble()
+			isString -> asString()
+			hasArrayElements() -> (0 until arraySize).map { getArrayElement(it).toKotlin() }
+			isHostObject -> {
+				when (val host = asHostObject<Any?>()) {
+					is Map<*, *> -> host.entries.associate { (k, v) ->
+						k.toString() to ((v as? Value)?.toKotlin() ?: v)
+					}
+
+					else -> host
+				}
 			}
+			hasMembers() -> memberKeys.associateWith { getMember(it).toKotlin() }
+			else -> this
 		}
 
 		inputs.forEach { (k, v) ->
@@ -965,20 +972,19 @@ class MainApp : Application() {
 		}
 		val outputs = mutableMapOf<String, MutableMap<String, Any?>>()
 		for (name in outputNames) {
-			if (inputs.containsKey(name))
+			if (inputs.containsKey(name)) {
 				error("Имя «$name» уже занято входным параметром")
+			}
 			val m = mutableMapOf<String, Any?>()
 			outputs[name] = m
-			context.getBindings("js")
-				.putMember(name, ProxyObject.fromMap(m))
+			context.getBindings("js").putMember(name, ProxyObject.fromMap(m))
 		}
-		context.eval("js", this).toKotlin()
-		val cleaned: Map<String, MutableMap<String, Any?>> =
-			outputs.mapValues { (_, inner) ->
-				inner.mapValues { (_, v) ->
-					if (v is Value) v.toKotlin() else v
-				}.toMutableMap()
-			}
+		context.eval("js", this)
+		val cleaned = outputs.mapValues { (_, inner) ->
+			inner.mapValues { (_, v) ->
+				if (v is Value) v.toKotlin() else v
+			}.toMutableMap()
+		}
 		return cleaned
 	}
 
