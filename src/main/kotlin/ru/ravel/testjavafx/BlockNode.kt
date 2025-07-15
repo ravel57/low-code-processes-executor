@@ -295,7 +295,11 @@ class BlockNode(
 
 			val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
 			val docsTab = Tab("DataDocs", VBox(docsScroll)).apply { isClosable = false }
-			val tabPane = TabPane(codeTab, docsTab, configTab)
+			val tabPane = if (blockType != BlockType.SUB_PROJECT) {
+				TabPane(codeTab, docsTab, configTab)
+			} else {
+				TabPane(docsTab)
+			}
 			VBox.setVgrow(tabPane, Priority.ALWAYS)
 
 			var pipPackagesBox: VBox? = null
@@ -441,7 +445,7 @@ class BlockNode(
 	}
 
 
-	private fun recreateIOCircles() {
+	fun recreateIOCircles() {
 		// Удалить старые кружки
 		children.removeAll(inputCircles)
 		children.removeAll(outputCircles)
@@ -744,6 +748,18 @@ class BlockNode(
 	private fun snapToGrid(gridSize: Double = 10.0) {
 		layoutX = (layoutX / gridSize).roundToInt() * gridSize
 		layoutY = (layoutY / gridSize).roundToInt() * gridSize
+	}
+
+
+	fun updatePorts(newInputs: Int, newOutputs: Int) {
+		if (newInputs == inputCount && newOutputs == outputCount) {
+			return
+		}
+		inputCount = newInputs.coerceAtLeast(0)
+		outputCount = newOutputs.coerceAtLeast(0)
+		inputNames = MutableList(inputCount) { i -> inputNames.getOrElse(i) { "in$i" } }
+		outputNames = MutableList(outputCount) { i -> outputNames.getOrElse(i) { "out$i" } }
+		recreateIOCircles()
 	}
 
 }

@@ -9,5 +9,6 @@ enum class BlockType(val displayName: String, val color: Color) {
 	CONNECTOR("Connector", Color.LIGHTBLUE),
 	INPUT_DATA("InputData", Color.LIGHTGRAY),
 	START("Start", Color.LIGHTGREEN),
-	EXIT("Exit", Color.LIGHTSALMON)
+	EXIT("Exit", Color.LIGHTSALMON),
+	SUB_PROJECT("Проект", Color.YELLOWGREEN),
 }

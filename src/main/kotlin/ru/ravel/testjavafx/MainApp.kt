@@ -123,7 +123,20 @@ class MainApp : Application() {
 				BlockType.entries.forEach { type ->
 					val item = MenuItem(type.displayName)
 					item.setOnAction {
-						addBlock(contentPane, event.x, event.y, type.displayName, type)
+						if (type == BlockType.SUB_PROJECT) {
+							val fc = FileChooser().apply {
+								title = "Выберите проект"
+								extensionFilters += FileChooser.ExtensionFilter("JSON", "*.json")
+							}
+							val file = fc.showOpenDialog(primaryStage)
+							if (file != null) {
+								val node = addBlock(contentPane, event.x, event.y, file.nameWithoutExtension, type)
+								node.otherInfo = file.absolutePath
+								adjustProjectNodeIO(node, file)
+							}
+						} else {
+							addBlock(contentPane, event.x, event.y, type.displayName, type)
+						}
 					}
 					contextMenu.items.add(item)
 				}
@@ -278,12 +291,13 @@ class MainApp : Application() {
 		selectedBlock = null
 	}
 
-	private fun addBlock(parent: Pane, x: Double, y: Double, name: String, blockType: BlockType) {
+	private fun addBlock(parent: Pane, x: Double, y: Double, name: String, blockType: BlockType): BlockNode {
 		val block = BlockNode(x, y, name, blockType)
 		blocks.add(block)
 		block.onMove = { ensureBlockVisible(block) }
 		parent.children.add(block)
 		setupHandlersForBlock(block)
+		return block
 	}
 
 
@@ -422,6 +436,9 @@ class MainApp : Application() {
 						event.consume()
 					}
 				}
+			}
+			if (block.blockType == BlockType.SUB_PROJECT && block.otherInfo.isNotBlank()) {
+				adjustProjectNodeIO(block, File(block.otherInfo))
 			}
 		}
 
@@ -611,9 +628,16 @@ class MainApp : Application() {
 						toBlock.connectedLines.add(conn)
 
 						conn.line.onMouseClicked = EventHandler { onMouseEvent ->
-							if (onMouseEvent.button == MouseButton.PRIMARY) {
-								selectConnection(conn)
-								(conn.line.parent as? Pane)?.requestFocus()
+							if (onMouseEvent.clickCount == 2 && onMouseEvent.button == MouseButton.PRIMARY && block.blockType == BlockType.SUB_PROJECT) {
+								block.otherInfo.let { path ->
+									val file = File(path)
+									if (file.exists()) {
+										val stage = Stage()
+										val subApp = MainApp()
+										subApp.importBlocksFromFile(file)
+										subApp.start(stage)
+									}
+								}
 								onMouseEvent.consume()
 							}
 						}
@@ -660,10 +684,13 @@ class MainApp : Application() {
 		fun runBlockRecursively(block: BlockNode) {
 			val inputConnections = connections.filter { it.to == block }
 			val allInputsFilled = inputConnections.all { conn ->
-				val fromBlock = conn.from
-				val fromPort = conn.fromPort
-				val outputs = fromBlock.outputsData
-				outputs.size > fromPort && !isDataEmpty(outputs[fromPort])
+				val src = conn.from
+				val port = conn.fromPort
+				val out = src.outputsData
+				if (out.size <= port) return@all false
+				if (src.blockType in arrayOf(BlockType.START, BlockType.INPUT_DATA))
+					return@all true
+				!isDataEmpty(out[port])
 			}
 			if (!allInputsFilled) {
 				return
@@ -825,22 +852,43 @@ class MainApp : Application() {
 				}
 			}
 
-			BlockType.INPUT_DATA, BlockType.START -> {
-				block.outputsData.add(
-					try {
-						when (block.inputFormat) {
-							InputFormatType.JSON -> ObjectMapper().readValue<MutableMap<String, Any>>(block.code)
-							InputFormatType.XML -> XmlMapper().readValue<MutableMap<String, Any>>(block.code)
-							InputFormatType.YAML -> Yaml().load(block.code)
-							InputFormatType.PROTOBUF -> TODO()
-						}
-					} catch (e: Exception) {
-						mutableMapOf()
+			BlockType.INPUT_DATA -> {
+				val parsed: MutableMap<String, Any> = try {
+					when (block.inputFormat) {
+						InputFormatType.JSON -> ObjectMapper()
+							.readValue(block.code, MutableMap::class.java) as MutableMap<String, Any>
+
+						InputFormatType.YAML -> Yaml()
+							.load(block.code) as? MutableMap<String, Any> ?: mutableMapOf()
+
+						InputFormatType.XML -> XmlMapper()
+							.readValue(block.code, MutableMap::class.java) as MutableMap<String, Any>
+
+						InputFormatType.PROTOBUF -> TODO("поддержите при необходимости")
 					}
-				)
+				} catch (ex: Exception) {
+					mutableMapOf("_parseError" to ex.message.toString())
+				}
+				if (parsed.isEmpty() && block.code.isNotBlank()) parsed["data"] = block.code
+				block.outputsData = mutableListOf(parsed)
+			}
+
+			BlockType.START -> {
+				val map = mutableMapOf<String, Any>()
+				if (block.code.isNotBlank()) map["trigger"] = block.code.trim()
+				block.outputsData = mutableListOf(map)
 			}
 
 			BlockType.EXIT -> {}
+			BlockType.SUB_PROJECT -> {
+				val file = File(block.otherInfo)
+				if (file.exists()) {
+					val outs = runSubProject(file, block)
+					block.outputsData = outs.toMutableList()
+				} else {
+					block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
+				}
+			}
 		}
 	}
 
@@ -949,11 +997,12 @@ class MainApp : Application() {
 
 		fun Value.toKotlin(): Any? {
 			fun Any?.deepUnwrap(): Any? = when (this) {
-				is Value        -> this.toKotlin()            // раскрутить Value
-				is Map<*, *>    -> this.mapValues { (_, v) -> v.deepUnwrap() }
+				is Value -> this.toKotlin()            // раскрутить Value
+				is Map<*, *> -> this.mapValues { (_, v) -> v.deepUnwrap() }
 					.toMutableMap()
-				is List<*>      -> this.map { it.deepUnwrap() }
-				else            -> this                       // примитивы
+
+				is List<*> -> this.map { it.deepUnwrap() }
+				else -> this                       // примитивы
 			}
 
 			return when {
@@ -1062,6 +1111,169 @@ class MainApp : Application() {
 			emptyMap()
 		}
 		return result
+	}
+
+	/**
+	 * Выполняет подпроект так же, как runButtonHandler(),
+	 * но полностью «в памяти» и без GUI.
+	 * @return список карт для вывода из EXIT-блока в том же порядке,
+	 *         в каком они сконфигурированы у SUB_PROJECT-ноды.
+	 */
+	private fun runSubProject(file: File, parentBlock: BlockNode): List<MutableMap<String, Any>> {
+		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
+
+		/* --- 1. Строим внутренние BlockNode без UI --- */
+		val idToBlock = mutableMapOf<UUID, BlockNode>()
+		val blocks = data.blocks.map { b ->
+			val bn = BlockNode(
+				x = 0.0, y = 0.0,
+				name = b.name,
+				blockType = BlockType.valueOf(b.blockType),
+				code = b.code ?: "",
+				inputCount = b.inputCount,
+				outputCount = b.outputCount,
+				serializedId = b.id,
+				inputFormat = b.inputFormat ?: InputFormatType.JSON,
+				otherInfo = b.otherInfo ?: "",
+				inputNames = b.inputNames?.toMutableList() ?: MutableList(b.inputCount) { "in$it" },
+				outputNames = b.outputNames?.toMutableList() ?: MutableList(b.outputCount) { "out$it" },
+				outputsData = mutableListOf()
+			)
+			idToBlock[b.id] = bn
+			bn
+		}.toMutableList()
+
+		/* --- 2. Конвертируем соединения --- */
+		val connections = data.connections.map { c ->
+			Connection(
+				from = idToBlock[c.fromId]!!,
+				to = idToBlock[c.toId]!!,
+				line = Line(),   // GUI не нужен
+				fromPort = c.fromOutputIndex,
+				toPort = c.toInputIndex
+			)
+		}.toMutableList()
+
+		connections.forEach { c ->
+			c.from.connectedLines.add(c)
+			c.to.connectedLines.add(c)
+		}
+
+		/* --- 3. Передаём входы из внешнего блока внутрь подпроекта --- */
+		// Передагаем по совпадению имён: in0 -> first INPUT_DATA / START, и т.д.
+		val entryBlocks = blocks.filter {
+			when (it.blockType) {
+				BlockType.START -> true
+				BlockType.INPUT_DATA -> it.code.isBlank()
+				else -> false
+			}
+		}.toMutableList()
+		parentBlock.connectedLines
+			.filter { it.to == parentBlock }
+			.forEachIndexed { idx, conn ->
+				val target = entryBlocks.getOrNull(idx) ?: return@forEachIndexed
+				val src = conn.from.outputsData.getOrNull(conn.fromPort) ?: return@forEachIndexed
+				target.outputsData = mutableListOf(src)
+			}
+
+		val inputStubsNeeded = parentBlock.inputCount - entryBlocks.size
+		repeat(inputStubsNeeded) {
+			val stub = BlockNode(
+				x = 0.0, y = 0.0,
+				name = "EXT_IN$it",
+				blockType = BlockType.INPUT_DATA,
+				inputCount = 0,
+				outputCount = 1,
+				inputFormat = InputFormatType.JSON,      // или YAML
+				outputsData = mutableListOf()
+			)
+			blocks.add(stub)
+			entryBlocks.add(stub)
+		}
+
+		fun execute(b: BlockNode) {
+			// если это INPUT/START и данные уже проставлены вручную – оставляем как есть
+			if (b.blockType in arrayOf(BlockType.INPUT_DATA, BlockType.START) && b.outputsData.isNotEmpty()) {
+				return
+			}
+			b.outputsData = mutableListOf()
+			when (b.blockType) {
+				BlockType.MAPPING_GROOVY,
+				BlockType.MAPPING_JAVA_SCRIPT,
+				BlockType.MAPPING_PYTHON,
+				BlockType.CONNECTOR,
+				BlockType.INPUT_DATA,
+				BlockType.START -> runBlock(b)
+
+				BlockType.EXIT,
+				BlockType.SUB_PROJECT -> {
+				}    // EXIT не исполняем явно
+			}
+		}
+
+		// топологическая сортировка «в лоб»
+		val incoming = mutableMapOf<BlockNode, MutableSet<BlockNode>>()
+		val outgoing = mutableMapOf<BlockNode, MutableList<BlockNode>>()
+		blocks.forEach { incoming[it] = mutableSetOf() }
+		connections.forEach { c ->
+			incoming[c.to]?.add(c.from)
+			outgoing.computeIfAbsent(c.from) { mutableListOf() }.add(c.to)
+		}
+		val queue = ArrayDeque(blocks.filter { incoming[it]?.isEmpty() == true })
+		while (queue.isNotEmpty()) {
+			val b = queue.removeFirst()
+			// ждём, пока все входы заполнятся
+			val ready = connections.filter { it.to == b }
+				.all { c ->
+					c.from.outputsData.size > c.fromPort && (c.from.blockType == BlockType.START || !isDataEmpty(c.from.outputsData[c.fromPort]))
+				}
+			if (!ready) {
+				continue
+			}
+			execute(b)
+			outgoing[b]?.forEach { child ->
+				incoming[child]?.remove(b)
+				if (incoming[child]?.isEmpty() == true) queue.add(child)
+			}
+		}
+
+		/* --- 5. Ищем EXIT и возвращаем его входные данные --- */
+		val exitBlocks = blocks
+			.filter { it.blockType == BlockType.EXIT }
+			.sortedWith(compareBy<BlockNode> { it.layoutY }.thenBy { it.layoutX })
+
+		val exitOutputs = exitBlocks.map { ex ->
+			val merged = mutableMapOf<String, Any>()
+			connections.filter { it.to == ex }
+				.sortedBy { it.toPort }
+				.forEach { conn ->
+					val src = conn.from.outputsData.getOrNull(conn.fromPort) as? Map<*, *>
+					if (src != null) merged.putAll(src as Map<String, Any>)
+				}
+			merged
+		}.toMutableList()
+
+		while (exitOutputs.size < parentBlock.outputCount) {
+			exitOutputs.add(mutableMapOf())
+		}
+		return exitOutputs.take(parentBlock.outputCount)
+	}
+
+
+	private fun adjustProjectNodeIO(node: BlockNode, file: File) {
+		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
+		val newInputs = data.blocks.count { it.blockType == "START" }
+		val newOutputs = data.blocks.count { it.blockType == "EXIT" }
+		node.updatePorts(newInputs/*.coerceAtLeast(1)*/, newOutputs/*.coerceAtLeast(1)*/)
+
+		val inputBlocks = data.blocks.filter { it.blockType == "START" }
+		val outputBlocks = data.blocks.filter { it.blockType == "EXIT" }
+		node.inputNames = inputBlocks.map { it.name }.toMutableList()
+		node.outputNames = outputBlocks.map { it.name }.toMutableList()
+		node.inputCount = node.inputNames.size
+		node.outputCount = node.outputNames.size
+
+		node.recreateIOCircles()
 	}
 
 
