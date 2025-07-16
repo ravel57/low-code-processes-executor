@@ -1,5 +1,7 @@
 package ru.ravel.testjavafx
 
+//import javafx.scene.web.WebView
+import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.module.kotlin.readValue
@@ -27,10 +29,14 @@ import org.graalvm.polyglot.Context
 import org.graalvm.polyglot.Value
 import org.graalvm.polyglot.proxy.ProxyObject
 import org.yaml.snakeyaml.Yaml
+import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.BlocksData
 import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.*
 
 
@@ -131,7 +137,7 @@ class MainApp : Application() {
 							val file = fc.showOpenDialog(primaryStage)
 							if (file != null) {
 								val node = addBlock(contentPane, event.x, event.y, file.nameWithoutExtension, type)
-								node.otherInfo = file.absolutePath
+								node.subProjectPath = file.absolutePath
 								adjustProjectNodeIO(node, file)
 							}
 						} else {
@@ -174,6 +180,7 @@ class MainApp : Application() {
 				val file = fileChooser.showOpenDialog(primaryStage)
 				if (file != null) {
 					importBlocksFromFile(file)
+					importOutputsData(file)
 					currentProjectFile = file
 					primaryStage.title = currentProjectFile?.name ?: "Low code processes executor"
 				}
@@ -256,6 +263,10 @@ class MainApp : Application() {
 				}
 			}
 		}
+
+//		val webView = WebView()
+//		webView.engine.loadContent("<h1>Hello, World!</h1>")
+
 		primaryStage.title = currentProjectFile?.name ?: "Low code processes executor"
 		primaryStage.show()
 		setupContextMenu()
@@ -304,15 +315,88 @@ class MainApp : Application() {
 	// --- Сериализация и загрузка ---
 
 	private fun exportBlocksToFile(file: File) {
-		currentProjectFile = file
-		val blocksData = BlocksData(blocks.map { it.toSerialized() }, connections.map { it.toSerialized() })
-		file.writeText(ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(blocksData))
+		saveOutputsData(file)
+
+		val projectDir = file.parentFile ?: File(".")
+		// Например, создаём папку для всех фрагментов кода/данных
+		val resourcesDir = File(projectDir, "${file.nameWithoutExtension}_resources")
+		resourcesDir.mkdirs()
+
+		// Для каждого блока: сохраняем code и/или dataDocs в отдельные файлы
+		val serializedBlocks = blocks.map { block ->
+			// уникальное имя файла на основе UUID блока
+			val baseName = block.serializedId.toString()
+			var codeFile: String? = null
+			var dataDocsFile: String? = null
+
+			when (block.blockType) {
+				BlockType.INPUT_DATA -> {
+					// выбираем расширение по inputFormat
+					val ext = when (block.inputFormat) {
+						InputFormatType.JSON -> "json"
+						InputFormatType.XML -> "xml"
+						InputFormatType.YAML -> "yaml"
+						else -> "txt"
+					}
+					val f = File(resourcesDir, "$baseName.$ext")
+					f.writeText(block.code)
+					codeFile = "${resourcesDir.name}/$baseName.$ext"
+				}
+
+				else -> {
+					// для всех маппингов — по языку
+					val ext = when (block.blockType) {
+						BlockType.MAPPING_GROOVY -> "groovy"
+						BlockType.MAPPING_PYTHON -> "py"
+						BlockType.MAPPING_JAVA_SCRIPT -> "js"
+						else -> "txt"
+					}
+					val f = File(resourcesDir, "$baseName.$ext")
+					f.writeText(block.code)
+					codeFile = "${resourcesDir.name}/$baseName.$ext"
+
+					if (block.dataDocs.isNotBlank()) {
+						val docsF = File(resourcesDir, "$baseName.docs.md")
+						docsF.writeText(block.dataDocs)
+						dataDocsFile = "${resourcesDir.name}/$baseName.docs.md"
+					}
+				}
+			}
+
+			// создаём сериализуемый объект с путями
+			BlockSerialized(
+				id = block.serializedId,
+				x = block.layoutX,
+				y = block.layoutY,
+				name = block.name,
+				blockType = block.blockType.name,
+				inputFormat = block.inputFormat,
+				codeFile = codeFile,        // вместо .code
+				dataDocsFile = dataDocsFile,    // вместо .dataDocs
+				subProjectPath = block.subProjectPath,
+				inputCount = block.inputCount,
+				outputCount = block.outputCount,
+				inputNames = block.inputNames.toList(),
+				outputNames = block.outputNames.toList(),
+				packagesNames = block.packagesNames
+			)
+		}
+
+		// пишем основной JSON
+		val blocksData = BlocksData(serializedBlocks, connections.map { it.toSerialized() })
+		file.writeText(
+			ObjectMapper().writerWithDefaultPrettyPrinter()
+				.writeValueAsString(blocksData)
+		)
 	}
 
 	private fun importBlocksFromFile(file: File) {
 		currentProjectFile = file
 		updateBlocks()
 		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
+		val projectDir = file.parentFile ?: File(".")
+		val resourcesDirName = "${file.nameWithoutExtension}_resources"
+		val resourcesDir = File(projectDir, resourcesDirName)
 
 		// Очистка
 		blocks.clear()
@@ -336,22 +420,26 @@ class MainApp : Application() {
 			} else {
 				b.outputCount.coerceAtLeast(1)
 			}
+			// читаем код из файла, если указан
+			val code = b.codeFile?.let { File(projectDir, it).readText() } ?: ""
+			val dataDocs = b.dataDocsFile?.let { File(projectDir, it).readText() } ?: ""
+
+			// создаём BlockNode как раньше, но передаём код и dataDocs
 			val block = BlockNode(
 				x = b.x,
 				y = b.y,
 				name = b.name,
-				blockType = blockType,
+				blockType = BlockType.valueOf(b.blockType),
 				inputCount = defaultInputCount,
 				outputCount = defaultOutputCount,
 				serializedId = b.id,
 				inputFormat = b.inputFormat ?: InputFormatType.JSON,
-				code = b.code ?: "",
-				dataDocs = b.dataDocs ?: "",
-				otherInfo = b.otherInfo ?: "",
+				code = code,        // загруженный из файла
+				dataDocs = dataDocs,    // загруженный из файла
+				subProjectPath = b.subProjectPath ?: "",
 				inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
 				outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
-				outputsData = b.outputsData ?: mutableListOf(),
-				packagesNames = b.packagesNames ?: mutableListOf(),
+				packagesNames = b.packagesNames ?: mutableListOf()
 			)
 			block.onMove = { ensureBlockVisible(block) }
 			blocks.add(block)
@@ -437,8 +525,8 @@ class MainApp : Application() {
 					}
 				}
 			}
-			if (block.blockType == BlockType.SUB_PROJECT && block.otherInfo.isNotBlank()) {
-				adjustProjectNodeIO(block, File(block.otherInfo))
+			if (block.blockType == BlockType.SUB_PROJECT && block.subProjectPath.isNotBlank()) {
+				adjustProjectNodeIO(block, File(block.subProjectPath))
 			}
 		}
 
@@ -466,6 +554,48 @@ class MainApp : Application() {
 				}
 			}
 			(scrollPane.content as? Pane)?.children?.add(line)
+		}
+	}
+
+
+	private fun saveOutputsData(projectFile: File) {
+		val projectDir = projectFile.parentFile ?: File(".")
+		val outputsDir = File(projectDir, "${projectFile.nameWithoutExtension}_outputs_data")
+		outputsDir.mkdirs()
+		val outputsMap = blocks.associate { it.serializedId.toString() to it.outputsData }
+		val timestamp = DateTimeFormatter
+			.ofPattern("yyyyMMddHHmmss")
+			.withZone(ZoneId.systemDefault())
+			.format(Instant.now())
+		val timestampedFile = File(outputsDir, "$timestamp.json")
+		timestampedFile.writeText(
+			ObjectMapper()
+				.writerWithDefaultPrettyPrinter()
+				.writeValueAsString(outputsMap)
+		)
+		val latestFile = File(outputsDir, "last_run.json")
+		latestFile.writeText(
+			ObjectMapper()
+				.writerWithDefaultPrettyPrinter()
+				.writeValueAsString(outputsMap)
+		)
+	}
+
+
+	private fun importOutputsData(projectFile: File) {
+		val projectDir = projectFile.parentFile ?: File(".")
+		val outputsDir = File(projectDir, "${projectFile.nameWithoutExtension}_outputs_data")
+		val latestFile = File(outputsDir, "last_run.json")
+		if (!latestFile.exists()) {
+			return
+		}
+		val typeRef = object : TypeReference<Map<String, List<Map<String, Any>>>>() {}
+		val outputsMap = ObjectMapper().readValue(latestFile, typeRef)
+		blocks.forEach { block ->
+			block.outputsData = outputsMap[block.serializedId.toString()]
+				?.map { it.toMutableMap() }
+				?.toMutableList()
+				?: mutableListOf()
 		}
 	}
 
@@ -629,12 +759,13 @@ class MainApp : Application() {
 
 						conn.line.onMouseClicked = EventHandler { onMouseEvent ->
 							if (onMouseEvent.clickCount == 2 && onMouseEvent.button == MouseButton.PRIMARY && block.blockType == BlockType.SUB_PROJECT) {
-								block.otherInfo.let { path ->
+								block.subProjectPath.let { path ->
 									val file = File(path)
 									if (file.exists()) {
 										val stage = Stage()
 										val subApp = MainApp()
 										subApp.importBlocksFromFile(file)
+										subApp.importOutputsData(file)
 										subApp.start(stage)
 									}
 								}
@@ -751,6 +882,9 @@ class MainApp : Application() {
 					break
 				}
 			}
+		}
+		currentProjectFile?.let { projectFile ->
+			saveOutputsData(projectFile)
 		}
 	}
 
@@ -881,7 +1015,7 @@ class MainApp : Application() {
 
 			BlockType.EXIT -> {}
 			BlockType.SUB_PROJECT -> {
-				val file = File(block.otherInfo)
+				val file = File(block.subProjectPath)
 				if (file.exists()) {
 					val outs = runSubProject(file, block)
 					block.outputsData = outs.toMutableList()
@@ -1121,20 +1255,24 @@ class MainApp : Application() {
 	 */
 	private fun runSubProject(file: File, parentBlock: BlockNode): List<MutableMap<String, Any>> {
 		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
+		val subDir = file.parentFile
 
 		/* --- 1. Строим внутренние BlockNode без UI --- */
 		val idToBlock = mutableMapOf<UUID, BlockNode>()
 		val blocks = data.blocks.map { b ->
+			val codeText = b.codeFile
+				?.let { File(subDir, it).readText() }
+				?: b.codeFile.orEmpty()
 			val bn = BlockNode(
 				x = 0.0, y = 0.0,
 				name = b.name,
 				blockType = BlockType.valueOf(b.blockType),
-				code = b.code ?: "",
+				code = codeText,
 				inputCount = b.inputCount,
 				outputCount = b.outputCount,
 				serializedId = b.id,
 				inputFormat = b.inputFormat ?: InputFormatType.JSON,
-				otherInfo = b.otherInfo ?: "",
+				subProjectPath = b.subProjectPath ?: "",
 				inputNames = b.inputNames?.toMutableList() ?: MutableList(b.inputCount) { "in$it" },
 				outputNames = b.outputNames?.toMutableList() ?: MutableList(b.outputCount) { "out$it" },
 				outputsData = mutableListOf()

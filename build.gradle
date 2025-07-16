@@ -22,6 +22,7 @@ javafx {
 dependencies {
 	implementation 'org.openjfx:javafx-controls:21.0.2'
 	implementation 'org.openjfx:javafx-fxml:21.0.2'
+	implementation 'org.openjfx:javafx-web:21.0.2'
 	implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.23'
 	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2'
 	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2'
@@ -87,12 +88,13 @@ application {
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 	kotlinOptions {
-		jvmTarget = "21" // или 17 — под вашу Java
+		jvmTarget = "21"
 	}
 }
 
 applicationDefaultJvmArgs = [
 		"--add-opens=kotlinx.coroutines.core/kotlinx.coroutines.debug.internal=ALL-UNNAMED",
+		"--add-modules", "javafx.controls,javafx.web",
 		"-Dkotlinx.coroutines.debug=on",
 		"-Dpolyglot.engine.WarnInterpreterOnly=false",
 ]

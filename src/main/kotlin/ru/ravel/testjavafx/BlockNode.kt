@@ -27,7 +27,6 @@ import org.fxmisc.richtext.CodeArea
 import org.fxmisc.richtext.LineNumberFactory
 import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.Yaml
-import ru.ravel.testjavafx.model.BlockSerialized
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
 import java.util.*
@@ -45,7 +44,7 @@ class BlockNode(
 	var serializedId: UUID = UUID.randomUUID(),
 	var inputFormat: InputFormatType = InputFormatType.JSON,
 	var dataDocs: String = "",
-	var otherInfo: String = "",
+	var subProjectPath: String = "",
 	var inputNames: MutableList<String> = MutableList(inputCount) { "in${it}" },
 	var outputNames: MutableList<String> = MutableList(outputCount) { "out${it}" },
 	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf(),
@@ -644,59 +643,6 @@ class BlockNode(
 	fun rebuildCirclesHandlers(handler: (outIndex: Int, outCircle: Circle) -> Unit) {
 		outputCircles.forEachIndexed { outIndex, outCircle ->
 			handler(outIndex, outCircle)
-		}
-	}
-
-	fun toSerialized(): BlockSerialized = BlockSerialized(
-		id = this.serializedId,
-		x = this.layoutX,
-		y = this.layoutY,
-		name = this.name,
-		blockType = this.blockType.name,
-		inputFormat = this.inputFormat,
-		code = this.code,
-		dataDocs = this.dataDocs,
-		otherInfo = this.otherInfo,
-		inputCount = this.inputCount,
-		outputCount = this.outputCount,
-		inputNames = this.inputNames.toList(),
-		outputNames = this.outputNames.toList(),
-		outputsData = outputsData,
-		packagesNames = packagesNames,
-	)
-
-	fun updateOutputs() {
-		// Удаляем старые выходы из children
-		children.removeAll(outputCircles)
-		outputCircles.clear()
-		for (i in 0 until outputCount) {
-			val circle = Circle(width - 10.0, 15.0 + i * 20, 9.0, Color.ORANGE).apply {
-				stroke = Color.DARKRED
-				strokeWidth = 2.0
-			}
-			outputCircles.add(circle)
-			children.add(circle)
-
-			// Обработчики:
-			circle.onMousePressed = EventHandler { event ->
-				if (event.button == MouseButton.PRIMARY) {
-					(scene?.window?.userData as? MainApp)?.let { app ->
-						app.startConnectionFromBlock(this@BlockNode, i)
-					}
-					event.consume()
-				}
-			}
-			circle.onMouseDragged = EventHandler { event ->
-				if (event.button == MouseButton.PRIMARY) {
-					(scene?.window?.userData as? MainApp)?.continueConnectionDrag(event)
-					event.consume()
-				}
-			}
-			circle.onMouseReleased = EventHandler { event ->
-				if (event.button == MouseButton.PRIMARY) {
-					event.consume()
-				}
-			}
 		}
 	}
 
