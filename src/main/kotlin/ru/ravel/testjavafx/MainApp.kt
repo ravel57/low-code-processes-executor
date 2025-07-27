@@ -29,10 +29,7 @@ import org.graalvm.polyglot.Context
 import org.graalvm.polyglot.Value
 import org.graalvm.polyglot.proxy.ProxyObject
 import org.yaml.snakeyaml.Yaml
-import ru.ravel.testjavafx.model.BlockSerialized
-import ru.ravel.testjavafx.model.BlockType
-import ru.ravel.testjavafx.model.BlocksData
-import ru.ravel.testjavafx.model.InputFormatType
+import ru.ravel.testjavafx.model.*
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -212,10 +209,7 @@ class MainApp : Application() {
 		val runButton = Button("Бег").apply {
 			setOnAction { runButtonHandler() }
 		}
-		val dataDocksButton = Button("DataDocs").apply {
-			setOnAction { }
-		}
-		val runButtonBox = HBox(10.0, runButton, dataDocksButton).apply {
+		val runButtonBox = HBox(10.0, runButton).apply {
 			padding = Insets(8.0)
 		}
 		val root = VBox(savesButtonBox, runButtonBox, scrollPane)
@@ -327,7 +321,6 @@ class MainApp : Application() {
 			// уникальное имя файла на основе UUID блока
 			val baseName = block.serializedId.toString()
 			var codeFile: String? = null
-			var dataDocsFile: String? = null
 
 			when (block.blockType) {
 				BlockType.INPUT_DATA -> {
@@ -358,7 +351,6 @@ class MainApp : Application() {
 					if (block.dataDocs.isNotBlank()) {
 						val docsF = File(resourcesDir, "$baseName.docs.md")
 						docsF.writeText(block.dataDocs)
-						dataDocsFile = "${resourcesDir.name}/$baseName.docs.md"
 					}
 				}
 			}
@@ -371,14 +363,13 @@ class MainApp : Application() {
 				name = block.name,
 				blockType = block.blockType.name,
 				inputFormat = block.inputFormat,
-				codeFile = codeFile,        // вместо .code
-				dataDocsFile = dataDocsFile,    // вместо .dataDocs
+				codeFile = codeFile,
 				subProjectPath = block.subProjectPath,
 				inputCount = block.inputCount,
 				outputCount = block.outputCount,
 				inputNames = block.inputNames.toList(),
 				outputNames = block.outputNames.toList(),
-				packagesNames = block.packagesNames
+				packagesNames = block.packagesNames,
 			)
 		}
 
@@ -422,7 +413,6 @@ class MainApp : Application() {
 			}
 			// читаем код из файла, если указан
 			val code = b.codeFile?.let { File(projectDir, it).readText() } ?: ""
-			val dataDocs = b.dataDocsFile?.let { File(projectDir, it).readText() } ?: ""
 
 			// создаём BlockNode как раньше, но передаём код и dataDocs
 			val block = BlockNode(
@@ -435,11 +425,10 @@ class MainApp : Application() {
 				serializedId = b.id,
 				inputFormat = b.inputFormat ?: InputFormatType.JSON,
 				code = code,        // загруженный из файла
-				dataDocs = dataDocs,    // загруженный из файла
 				subProjectPath = b.subProjectPath ?: "",
 				inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
 				outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
-				packagesNames = b.packagesNames ?: mutableListOf()
+				packagesNames = b.packagesNames ?: mutableListOf(),
 			)
 			block.onMove = { ensureBlockVisible(block) }
 			blocks.add(block)
@@ -894,11 +883,13 @@ class MainApp : Application() {
 		when (block.blockType) {
 			BlockType.MAPPING_GROOVY -> {
 				val inputDataMap = HashMap<String, Any>()
-				block.connectedLines.filter {
-					it.to == block
-				}.forEachIndexed { index: Int, connection: Connection ->
-					inputDataMap[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
-				}
+				block.connectedLines
+					.filter { it.to == block }
+					.sortedBy { it.toPort }
+					.forEach { connection ->
+						val name = block.inputNames[connection.toPort]
+						inputDataMap[name] = connection.from.outputsData[connection.fromPort]
+					}
 				val outputs = (0 until block.outputCount)
 					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
 					.toMutableMap()
@@ -909,7 +900,7 @@ class MainApp : Application() {
 						block.outputsData.add(value)
 					}
 				} catch (e: Exception) {
-					System.err.println(e.localizedMessage)
+					System.err.println("${e.localizedMessage}\n${e.stackTraceToString()}")
 					Platform.runLater {
 						Alert(Alert.AlertType.ERROR).apply {
 							title = block.name
@@ -922,11 +913,12 @@ class MainApp : Application() {
 
 			BlockType.MAPPING_PYTHON -> {
 				val inputDataMap = HashMap<String, Any>()
-				block.connectedLines.filter {
-					it.to == block
-				}.forEachIndexed { index: Int, connection: Connection ->
-					inputDataMap[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
-				}
+				block.connectedLines
+					.filter { it.to == block }
+					.sortedBy { it.toPort }
+					.forEach { c ->
+						inputDataMap[block.inputNames[c.toPort]] = c.from.outputsData[c.fromPort]
+					}
 				val outputs = (0 until block.outputCount)
 					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
 					.toMutableMap()
@@ -940,7 +932,7 @@ class MainApp : Application() {
 						block.outputsData.add(value)
 					}
 				} catch (e: Exception) {
-					System.err.println(e.localizedMessage)
+					System.err.println("${e.localizedMessage}\n${e.stackTraceToString()}")
 					Platform.runLater {
 						Alert(Alert.AlertType.ERROR).apply {
 							title = "Ошибка"
@@ -953,9 +945,11 @@ class MainApp : Application() {
 
 			BlockType.MAPPING_JAVA_SCRIPT -> {
 				val inputs = HashMap<String, Any>()
-				block.connectedLines.filter { it.to == block }
-					.forEachIndexed { index: Int, connection: Connection ->
-						inputs[block.inputNames[index]] = connection.from.outputsData[connection.fromPort]
+				block.connectedLines
+					.filter { it.to == block }
+					.sortedBy { it.toPort }
+					.forEach { c ->
+						inputs[block.inputNames[c.toPort]] = c.from.outputsData[c.fromPort]
 					}
 				val outputNames = (0 until block.outputCount)
 					.map { index -> block.outputNames[index] }
@@ -965,7 +959,7 @@ class MainApp : Application() {
 						block.outputsData.add(result[name] as? MutableMap<String, Any> ?: mutableMapOf())
 					}
 				} catch (e: Exception) {
-					System.err.println(e.localizedMessage)
+					System.err.println("${e.localizedMessage}\n${e.stackTraceToString()}")
 					Platform.runLater {
 						Alert(Alert.AlertType.ERROR).apply {
 							title = "Ошибка"

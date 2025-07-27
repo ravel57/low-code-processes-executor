@@ -29,6 +29,7 @@ import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
+import ru.ravel.testjavafx.model.MapAction
 import java.util.*
 import kotlin.math.roundToInt
 
@@ -49,6 +50,7 @@ class BlockNode(
 	var outputNames: MutableList<String> = MutableList(outputCount) { "out${it}" },
 	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf(),
 	var packagesNames: MutableList<String> = mutableListOf(),
+	private var mapKeySettings: MutableMap<String, MapAction> = mutableMapOf(),
 ) : Pane() {
 
 	private val width = 150.0
@@ -275,15 +277,6 @@ class BlockNode(
 			val codeScroll = VirtualizedScrollPane(codeArea)
 			VBox.setVgrow(codeScroll, Priority.ALWAYS)
 
-			val dataDocsArea = CodeArea().apply {
-				replaceText(dataDocs)
-				paragraphGraphicFactory = LineNumberFactory.get(this)
-				isWrapText = true
-				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
-			}
-			val docsScroll = VirtualizedScrollPane(dataDocsArea)
-			VBox.setVgrow(docsScroll, Priority.ALWAYS)
-
 			// Новая вкладка
 			val editableInputsBox = buildEditableInputsBox()
 			val editableOutputsBox = buildEditableOutputsBox()
@@ -293,7 +286,8 @@ class BlockNode(
 			val configTab = Tab("Конфигурация входов и выходов", configBox).apply { isClosable = false }
 
 			val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
-			val docsTab = Tab("DataDocs", VBox(docsScroll)).apply { isClosable = false }
+			val docsTab = Tab("DataDocs", VBox(10.0, buildKeysPane()))
+				.apply { isClosable = false }
 			val tabPane = if (blockType != BlockType.SUB_PROJECT) {
 				TabPane(codeTab, docsTab, configTab)
 			} else {
@@ -342,7 +336,6 @@ class BlockNode(
 					outputNames = newOutputNames
 					outputCount = newOutputNames.size
 					code = codeArea.text
-					dataDocs = dataDocsArea.text
 					name = titleTextArea.text
 					label.text = name
 					recreateIOCircles()
@@ -706,6 +699,62 @@ class BlockNode(
 		inputNames = MutableList(inputCount) { i -> inputNames.getOrElse(i) { "in$i" } }
 		outputNames = MutableList(outputCount) { i -> outputNames.getOrElse(i) { "out$i" } }
 		recreateIOCircles()
+	}
+
+
+	/** Возвращает ScrollPane с перечнем ключей и RadioButton-ами. */
+	private fun buildKeysPane(): ScrollPane {
+		val inputsWithMaps = connectedLines
+			.filter { it.to == this }
+			.sortedBy { it.toPort }
+			.map { conn ->
+				val portIndex = conn.toPort
+				val inName = inputNames
+					.getOrNull(portIndex)
+					?: "in$portIndex"
+				val mp = (conn.from.outputsData
+					.getOrNull(conn.fromPort) as? Map<String,Any>)
+					?: emptyMap()
+				inName to mp
+			}
+		val compositeKeys = inputsWithMaps
+			.flatMap { (inName, mp) -> mp.keys.map { keyName -> "$inName.$keyName" } }
+			.toSet()
+			.sorted()
+
+		val rows = VBox(8.0).apply { padding = Insets(10.0) }
+
+		if (compositeKeys.isEmpty()) {
+			rows.children += Label("Нет входных данных — запустите процесс, чтобы сформировать last_run.json")
+		}
+
+		for (compositeKey in compositeKeys) {
+			val tg = ToggleGroup()
+			val rbSkip = RadioButton("Пропустить").apply { toggleGroup = tg }
+			val rbRead = RadioButton("Чтение").apply { toggleGroup = tg }
+			val rbEdit = RadioButton("Редактирование").apply { toggleGroup = tg }
+			when (mapKeySettings.getOrPut(compositeKey) { MapAction.SKIP }) {
+				MapAction.READ -> rbRead.isSelected = true
+				MapAction.EDIT -> rbEdit.isSelected = true
+				else -> rbSkip.isSelected = true
+			}
+			tg.selectedToggleProperty().addListener { _, _, newToggle ->
+				mapKeySettings[compositeKey] = when (newToggle) {
+					rbRead -> MapAction.READ
+					rbEdit -> MapAction.EDIT
+					else -> MapAction.SKIP
+				}
+			}
+			val row = HBox(10.0, Label(compositeKey), rbSkip, rbRead, rbEdit).apply {
+				alignment = Pos.CENTER_LEFT
+			}
+			rows.children += row
+		}
+
+		return ScrollPane(rows).apply {
+			isFitToWidth = true
+			prefHeight = 220.0
+		}
 	}
 
 }

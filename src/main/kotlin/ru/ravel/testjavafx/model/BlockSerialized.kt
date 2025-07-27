@@ -12,7 +12,6 @@ data class BlockSerialized @JsonCreator constructor(
 	@JsonProperty("blockType") val blockType: String = "",
 	@JsonProperty("inputFormat") val inputFormat: InputFormatType? = null,
 	@JsonProperty("code") val codeFile: String? = null,
-	@JsonProperty("dataDocs") val dataDocsFile: String? = null,
 	@JsonProperty("subProjectPath") val subProjectPath: String? = null,
 	@JsonProperty("inputCount") val inputCount: Int = 1,
 	@JsonProperty("outputCount") val outputCount: Int = 1,
