@@ -381,7 +381,7 @@ class MainApp : Application() {
 		)
 	}
 
-	private fun importBlocksFromFile(file: File) {
+	fun importBlocksFromFile(file: File) {
 		currentProjectFile = file
 		updateBlocks()
 		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
@@ -527,22 +527,37 @@ class MainApp : Application() {
 			val inIdx = c.toInputIndex
 			val (startX, startY) = fromBlock.outputPoint(outIdx)
 			val (endX, endY) = toBlock.inputPoint(inIdx)
-			val line = Line(startX, startY, endX, endY).apply {
+			val visibleLine = Line(startX, startY, endX, endY).apply {
 				stroke = Color.BLUE
 				strokeWidth = 2.0
 			}
-			val conn = Connection(fromBlock, toBlock, line, outIdx, inIdx)
+			val conn = Connection(fromBlock, toBlock, visibleLine, outIdx, inIdx)
+			val pickLine = Line().apply {
+				stroke = Color.TRANSPARENT
+				strokeWidth = 12.0
+				isPickOnBounds = false
+
+				startXProperty().bind(visibleLine.startXProperty())
+				startYProperty().bind(visibleLine.startYProperty())
+				endXProperty().bind(visibleLine.endXProperty())
+				endYProperty().bind(visibleLine.endYProperty())
+
+				onMouseClicked = EventHandler { ev ->
+					if (ev.button == MouseButton.PRIMARY) {
+						selectConnection(conn)
+						(parent as? Pane)?.requestFocus()
+						ev.consume()
+					}
+				}
+			}
+			(scrollPane.content as? Pane)?.children?.addAll(pickLine, visibleLine)
+			pickLine.toFront()
+			visibleLine.toFront()
 			connections.add(conn)
 			fromBlock.connectedLines.add(conn)
 			toBlock.connectedLines.add(conn)
-			line.onMouseClicked = EventHandler { event ->
-				if (event.button == MouseButton.PRIMARY) {
-					selectConnection(conn)
-					(line.parent as? Pane)?.requestFocus()
-					event.consume()
-				}
-			}
-			(scrollPane.content as? Pane)?.children?.add(line)
+			fromBlock.toFront()
+			toBlock.toFront()
 		}
 	}
 
@@ -571,7 +586,7 @@ class MainApp : Application() {
 	}
 
 
-	private fun importOutputsData(projectFile: File) {
+	fun importOutputsData(projectFile: File) {
 		val projectDir = projectFile.parentFile ?: File(".")
 		val outputsDir = File(projectDir, "${projectFile.nameWithoutExtension}_outputs_data")
 		val latestFile = File(outputsDir, "last_run.json")
@@ -703,6 +718,7 @@ class MainApp : Application() {
 					draggingFromOutputIndex = outputIdx
 					event.consume()
 				}
+				block.toFront()
 			}
 			outCircle.onMouseDragged = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY && draggingLine != null) {
@@ -719,14 +735,16 @@ class MainApp : Application() {
 					val paneCoords = contentPane.sceneToLocal(event.sceneX, event.sceneY)
 					// Найти input-кружок под курсором
 					val toBlockPair = blocks.asSequence().flatMap { other ->
-						other.inputCircles.mapIndexed { inputIdx, inputCircle -> Triple(other, inputCircle, inputIdx) }
+						other.inputCircles.mapIndexed { inputIdx, inputCircle ->
+							Triple(other, inputCircle, inputIdx)
+						}
 					}.find { (other, inputCircle, _) ->
-						if (other == draggingFromBlock) return@find false
-						val p = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
-						val panePoint = contentPane.sceneToLocal(p.x, p.y)
-						if (panePoint == null || paneCoords == null) {
+						if (other == draggingFromBlock) {
 							return@find false
 						}
+						val scenePoint = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
+						val panePoint = contentPane.sceneToLocal(scenePoint.x, scenePoint.y)
+						if (paneCoords == null || panePoint == null) return@find false
 						val dx = panePoint.x - paneCoords.x
 						val dy = panePoint.y - paneCoords.y
 						Math.hypot(dx, dy) <= inputCircle.radius + 4
@@ -735,32 +753,41 @@ class MainApp : Application() {
 						val (toBlock, _, inputIdx) = toBlockPair
 						val (startX, startY) = draggingFromBlock!!.outputPoint(draggingFromOutputIndex!!)
 						val (endX, endY) = toBlock.inputPoint(inputIdx)
-						draggingLine!!.startX = startX
-						draggingLine!!.startY = startY
-						draggingLine!!.endX = endX
-						draggingLine!!.endY = endY
+						val visibleLine = draggingLine!!.apply {
+							this.startX = startX
+							this.startY = startY
+							this.endX = endX
+							this.endY = endY
+						}
 						val conn = Connection(
-							draggingFromBlock!!, toBlock, draggingLine!!, draggingFromOutputIndex!!, inputIdx
+							draggingFromBlock!!,
+							toBlock,
+							visibleLine,
+							draggingFromOutputIndex!!,
+							inputIdx
 						)
+						val pickLine = Line().apply {
+							stroke = Color.TRANSPARENT
+							strokeWidth = 12.0
+							isPickOnBounds = false
+							startXProperty().bind(visibleLine.startXProperty())
+							startYProperty().bind(visibleLine.startYProperty())
+							endXProperty().bind(visibleLine.endXProperty())
+							endYProperty().bind(visibleLine.endYProperty())
+							onMouseClicked = EventHandler { ev ->
+								if (ev.button == MouseButton.PRIMARY) {
+									selectConnection(conn)
+									(parent as? Pane)?.requestFocus()
+									ev.consume()
+								}
+							}
+						}
+						(scrollPane.content as? Pane)?.children?.add(pickLine)
+						pickLine.toFront()
+						visibleLine.toFront()
 						connections.add(conn)
 						draggingFromBlock!!.connectedLines.add(conn)
 						toBlock.connectedLines.add(conn)
-
-						conn.line.onMouseClicked = EventHandler { onMouseEvent ->
-							if (onMouseEvent.clickCount == 2 && onMouseEvent.button == MouseButton.PRIMARY && block.blockType == BlockType.SUB_PROJECT) {
-								block.subProjectPath.let { path ->
-									val file = File(path)
-									if (file.exists()) {
-										val stage = Stage()
-										val subApp = MainApp()
-										subApp.importBlocksFromFile(file)
-										subApp.importOutputsData(file)
-										subApp.start(stage)
-									}
-								}
-								onMouseEvent.consume()
-							}
-						}
 						draggingLine = null
 						draggingFromOutputIndex = null
 					} else {
@@ -904,7 +931,7 @@ class MainApp : Application() {
 					Platform.runLater {
 						Alert(Alert.AlertType.ERROR).apply {
 							title = block.name
-							contentText = e.localizedMessage
+							contentText = "Exception in ${block.name}:\n${e.localizedMessage}"
 							showAndWait()
 						}
 					}

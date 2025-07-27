@@ -30,6 +30,7 @@ import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockType
 import ru.ravel.testjavafx.model.InputFormatType
 import ru.ravel.testjavafx.model.MapAction
+import java.io.File
 import java.util.*
 import kotlin.math.roundToInt
 
@@ -130,6 +131,21 @@ class BlockNode(
 		this.onMousePressed = EventHandler { event ->
 			if (event.button == MouseButton.SECONDARY) {
 				val contextMenu = ContextMenu()
+
+				// Пункт «Открыть подпроект» — только для SUB_PROJECT
+				if (blockType == BlockType.SUB_PROJECT) {
+					val openProjItem = MenuItem("Открыть подпроект")
+					openProjItem.setOnAction {
+						File(subProjectPath).takeIf { it.exists() }?.also { file ->
+							val stage = Stage()
+							val subApp = MainApp()
+							subApp.importBlocksFromFile(file)
+							subApp.importOutputsData(file)
+							subApp.start(stage)
+						}
+					}
+					contextMenu.items.add(openProjItem)
+				}
 
 				val deleteItem = MenuItem("Удалить")
 				deleteItem.setOnAction {
