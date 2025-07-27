@@ -320,7 +320,7 @@ class MainApp : Application() {
 		val serializedBlocks = blocks.map { block ->
 			// уникальное имя файла на основе UUID блока
 			val baseName = block.serializedId.toString()
-			var codeFile: String? = null
+			val codeFile: String?
 
 			when (block.blockType) {
 				BlockType.INPUT_DATA -> {
@@ -386,8 +386,8 @@ class MainApp : Application() {
 		updateBlocks()
 		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
 		val projectDir = file.parentFile ?: File(".")
-		val resourcesDirName = "${file.nameWithoutExtension}_resources"
-		val resourcesDir = File(projectDir, resourcesDirName)
+//		val resourcesDirName = "${file.nameWithoutExtension}_resources"
+//		val resourcesDir = File(projectDir, resourcesDirName)
 
 		// Очистка
 		blocks.clear()
@@ -1010,14 +1010,17 @@ class MainApp : Application() {
 			BlockType.INPUT_DATA -> {
 				val parsed: MutableMap<String, Any> = try {
 					when (block.inputFormat) {
-						InputFormatType.JSON -> ObjectMapper()
-							.readValue(block.code, MutableMap::class.java) as MutableMap<String, Any>
+						InputFormatType.JSON -> ObjectMapper().readValue(
+							block.code,
+							MutableMap::class.java
+						) as MutableMap<String, Any>
 
-						InputFormatType.YAML -> Yaml()
-							.load(block.code) as? MutableMap<String, Any> ?: mutableMapOf()
+						InputFormatType.YAML -> Yaml().load(block.code) as? MutableMap<String, Any> ?: mutableMapOf()
 
-						InputFormatType.XML -> XmlMapper()
-							.readValue(block.code, MutableMap::class.java) as MutableMap<String, Any>
+						InputFormatType.XML -> XmlMapper().readValue(
+							block.code,
+							MutableMap::class.java
+						) as MutableMap<String, Any>
 
 						InputFormatType.PROTOBUF -> TODO("поддержите при необходимости")
 					}
