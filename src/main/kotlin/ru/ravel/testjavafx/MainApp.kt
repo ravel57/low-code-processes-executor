@@ -39,7 +39,7 @@ import java.util.*
 
 class MainApp : Application() {
 	private var currentProjectFile: File? = null
-	private val blocks = mutableListOf<BlockNode>()
+	val blocks = mutableListOf<BlockNode>()
 	val connections = mutableListOf<Connection>()
 	private var draggingLine: Line? = null
 	private var draggingFromBlock: BlockNode? = null
@@ -336,6 +336,25 @@ class MainApp : Application() {
 					codeFile = "${resourcesDir.name}/$baseName.$ext"
 				}
 
+				BlockType.PROPERTIES -> {
+					// Сохраняем свойства как JSON в отдельный файл
+					val f = File(resourcesDir, "$baseName.json")
+					val propsMap = block.outputNames.mapIndexedNotNull { idx, name ->
+						block.outputsData.getOrNull(idx)?.get(name)?.let { name to it }
+					}.toMap()
+					f.writeText(ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(propsMap))
+					codeFile = "${resourcesDir.name}/$baseName.json"
+				}
+
+				BlockType.SUB_PROJECT -> {
+					val f = File(resourcesDir, "$baseName.json")
+					f.writeText(
+						ObjectMapper().writerWithDefaultPrettyPrinter()
+							.writeValueAsString(block.subProjectProps)
+					)
+					codeFile = "${resourcesDir.name}/$baseName.json"
+				}
+
 				else -> {
 					// для всех маппингов — по языку
 					val ext = when (block.blockType) {
@@ -401,15 +420,15 @@ class MainApp : Application() {
 			} catch (_: Exception) {
 				BlockType.MAPPING_GROOVY
 			}
-			val defaultInputCount = if (blockType in arrayOf(BlockType.START, BlockType.INPUT_DATA)) {
-				0
-			} else {
-				b.inputCount.coerceAtLeast(1)
+			val defaultInputCount = when (blockType) {
+				BlockType.START, BlockType.INPUT_DATA -> 0
+				BlockType.SUB_PROJECT -> b.inputCount // берём как есть, потом adjustProjectNodeIO всё поправит
+				else -> b.inputCount.coerceAtLeast(1)
 			}
-			val defaultOutputCount = if (blockType == BlockType.EXIT) {
-				0
-			} else {
-				b.outputCount.coerceAtLeast(1)
+			val defaultOutputCount = when (blockType) {
+				BlockType.EXIT -> 0
+				BlockType.SUB_PROJECT -> b.outputCount
+				else -> b.outputCount.coerceAtLeast(1)
 			}
 			// читаем код из файла, если указан
 			val code = b.codeFile?.let { File(projectDir, it).readText() } ?: ""
@@ -430,6 +449,31 @@ class MainApp : Application() {
 				outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
 				packagesNames = b.packagesNames ?: mutableListOf(),
 			)
+			if (block.blockType == BlockType.PROPERTIES && b.codeFile != null) {
+				val propsFile = File(projectDir, b.codeFile)
+				if (propsFile.exists() && propsFile.length() > 0) {
+					try {
+						val props: Map<String, Any> = ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
+						block.outputsData = props.entries.map { (k, v) ->
+							mutableMapOf(k to v)
+						}.toMutableList()
+					} catch (_: Exception) {
+						block.outputsData = mutableListOf()
+					}
+				} else {
+					// файл пустой — инициализируем пустыми значениями
+					block.outputsData = block.outputNames.map { name ->
+						mutableMapOf<String, Any>(name to "")
+					}.toMutableList()
+				}
+			}
+			if (block.blockType == BlockType.SUB_PROJECT && b.codeFile != null) {
+				val propsFile = File(projectDir, b.codeFile)
+				if (propsFile.exists() && propsFile.length() > 0) {
+					val props: Map<String, Any> = ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
+					block.subProjectProps = props.toMutableMap()
+				}
+			}
 			block.onMove = { ensureBlockVisible(block) }
 			blocks.add(block)
 			idToBlock[b.id] = block
@@ -571,17 +615,11 @@ class MainApp : Application() {
 			.ofPattern("yyyyMMddHHmmss")
 			.withZone(ZoneId.systemDefault())
 			.format(Instant.now())
-		val timestampedFile = File(outputsDir, "$timestamp.json")
-		timestampedFile.writeText(
-			ObjectMapper()
-				.writerWithDefaultPrettyPrinter()
-				.writeValueAsString(outputsMap)
+		File(outputsDir, "$timestamp.json").writeText(
+			ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(outputsMap)
 		)
-		val latestFile = File(outputsDir, "last_run.json")
-		latestFile.writeText(
-			ObjectMapper()
-				.writerWithDefaultPrettyPrinter()
-				.writeValueAsString(outputsMap)
+		File(outputsDir, "last_run.json").writeText(
+			ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(outputsMap)
 		)
 	}
 
@@ -596,10 +634,12 @@ class MainApp : Application() {
 		val typeRef = object : TypeReference<Map<String, List<Map<String, Any>>>>() {}
 		val outputsMap = ObjectMapper().readValue(latestFile, typeRef)
 		blocks.forEach { block ->
-			block.outputsData = outputsMap[block.serializedId.toString()]
-				?.map { it.toMutableMap() }
-				?.toMutableList()
-				?: mutableListOf()
+			if (block.blockType in arrayOf(BlockType.PROPERTIES, BlockType.SUB_PROJECT)) {
+				return@forEach
+			}
+			outputsMap[block.serializedId.toString()]?.let { list ->
+				block.outputsData = list.map { it.toMutableMap() }.toMutableList()
+			}
 		}
 	}
 
@@ -906,7 +946,9 @@ class MainApp : Application() {
 
 
 	private fun runBlock(block: BlockNode) {
-		block.outputsData = mutableListOf()
+		if (block.blockType !in arrayOf(BlockType.SUB_PROJECT, BlockType.PROPERTIES)) {
+			block.outputsData = mutableListOf()
+		}
 		when (block.blockType) {
 			BlockType.MAPPING_GROOVY -> {
 				val inputDataMap = HashMap<String, Any>()
@@ -1033,20 +1075,45 @@ class MainApp : Application() {
 
 			BlockType.START -> {
 				val map = mutableMapOf<String, Any>()
-				if (block.code.isNotBlank()) map["trigger"] = block.code.trim()
+				if (block.code.isNotBlank()) {
+					map["trigger"] = block.code.trim()
+				}
 				block.outputsData = mutableListOf(map)
 			}
 
 			BlockType.EXIT -> {}
+
 			BlockType.SUB_PROJECT -> {
 				val file = File(block.subProjectPath)
 				if (file.exists()) {
+					val prev = block.outputsData
+					block.outputsData = block.subProjectProps
+						.map { (k, v) -> mutableMapOf(k to v) }.toMutableList()
 					val outs = runSubProject(file, block)
-					block.outputsData = outs.toMutableList()
+					block.outputsData = outs.toMutableList() // наружу — результаты
 				} else {
 					block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
 				}
 			}
+
+
+			BlockType.PROPERTIES -> {
+				// Убедимся, что есть outputsData под все выходы
+				if (block.outputsData.size < block.outputNames.size) {
+					repeat(block.outputNames.size - block.outputsData.size) {
+						block.outputsData.add(mutableMapOf())
+					}
+				}
+
+				// Для каждого выхода: кладём значение по имени
+				block.outputsData = block.outputNames.mapIndexed { idx, name ->
+					val existing = block.outputsData.getOrNull(idx)?.get(name)
+					val value = existing ?: ""  // если ничего не было, оставляем пустую строку
+					mutableMapOf(name to value)
+				}.toMutableList()
+			}
+
+
 		}
 	}
 
@@ -1305,6 +1372,55 @@ class MainApp : Application() {
 			bn
 		}.toMutableList()
 
+		/* --- 1.1. ЗАГРУЖАЕМ PROPERTIES из ресурсов подпроекта --- */
+		data.blocks.forEach { b ->
+			if (BlockType.valueOf(b.blockType) == BlockType.PROPERTIES && b.codeFile != null) {
+				val bn = idToBlock[b.id] ?: return@forEach
+				val propsFile = File(subDir, b.codeFile)
+				if (propsFile.exists() && propsFile.length() > 0) {
+					try {
+						val props: Map<String, Any> =
+							ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
+						val byName = props
+						bn.outputsData = bn.outputNames.map { name ->
+							mutableMapOf<String, Any>(name to (byName[name] ?: ""))
+						}.toMutableList()
+					} catch (_: Exception) {
+						bn.outputsData = bn.outputNames.map { name ->
+							mutableMapOf<String, Any>(name to "")
+						}.toMutableList()
+					}
+				} else {
+					bn.outputsData = bn.outputNames.map { name ->
+						mutableMapOf<String, Any>(name to "")
+					}.toMutableList()
+				}
+			}
+		}
+
+		/* --- 1.5. Пробрасываем свойства из parentBlock ТОЛЬКО по ИМЕНАМ, без обнуления --- */
+		val propsByName: Map<String, Any> = parentBlock.outputsData
+			.flatMap { it.entries }
+			.associate { it.key to it.value }
+
+		blocks.filter { it.blockType == BlockType.PROPERTIES }.forEach { propBlock ->
+			// гарантируем размер outputsData = числу выходов
+			if (propBlock.outputsData.size < propBlock.outputNames.size) {
+				repeat(propBlock.outputNames.size - propBlock.outputsData.size) {
+					propBlock.outputsData.add(mutableMapOf())
+				}
+			}
+			propBlock.outputNames.forEachIndexed { idx, propName ->
+				val v = propsByName[propName]
+				if (v != null) {
+					propBlock.outputsData[idx] = mutableMapOf(propName to v)
+				} /*else if (propBlock.outputsData[idx].isEmpty()) {
+					propBlock.outputsData[idx] = mutableMapOf(propName to "")
+				}*/
+				// ВАЖНО: если v == null — НЕ трогаем значение из ресурсов!
+			}
+		}
+
 		/* --- 2. Конвертируем соединения --- */
 		val connections = data.connections.map { c ->
 			Connection(
@@ -1330,12 +1446,24 @@ class MainApp : Application() {
 				else -> false
 			}
 		}.toMutableList()
+
+		// сопоставляем каждый inputName из SUB_PROJECT с entryBlock
+		val entryByPort = entryBlocks.withIndex().associate { (i, b) ->
+			parentBlock.inputNames.getOrNull(i) to b
+		}
+
 		parentBlock.connectedLines
 			.filter { it.to == parentBlock }
-			.forEachIndexed { idx, conn ->
-				val target = entryBlocks.getOrNull(idx) ?: return@forEachIndexed
-				val src = conn.from.outputsData.getOrNull(conn.fromPort) ?: return@forEachIndexed
-				target.outputsData = mutableListOf(src)
+			.sortedBy { it.toPort }
+			.forEach { conn ->
+				val portName = parentBlock.inputNames.getOrNull(conn.toPort)
+				val target = entryByPort[portName] ?: entryBlocks.getOrNull(conn.toPort)
+				val src = conn.from.outputsData.getOrNull(conn.fromPort) ?: return@forEach
+
+				if (target != null) {
+					// если это START — записываем карту напрямую
+					target.outputsData = mutableListOf(src.toMutableMap())
+				}
 			}
 
 		val inputStubsNeeded = parentBlock.inputCount - entryBlocks.size
@@ -1353,12 +1481,23 @@ class MainApp : Application() {
 			entryBlocks.add(stub)
 		}
 
+		fun isDataEmpty(data: Any?): Boolean = when (data) {
+			null -> true
+			is Map<*, *> -> data.isEmpty()
+			is Collection<*> -> data.isEmpty()
+			is String -> data.isEmpty()
+			else -> false
+		}
+
 		fun execute(b: BlockNode) {
 			// если это INPUT/START и данные уже проставлены вручную – оставляем как есть
 			if (b.blockType in arrayOf(BlockType.INPUT_DATA, BlockType.START) && b.outputsData.isNotEmpty()) {
 				return
 			}
-			b.outputsData = mutableListOf()
+			// Для PROPERTIES не сбрасываем данные!
+			if (b.blockType != BlockType.PROPERTIES) {
+				b.outputsData = mutableListOf()
+			}
 			when (b.blockType) {
 				BlockType.MAPPING_GROOVY,
 				BlockType.MAPPING_JAVA_SCRIPT,
@@ -1367,9 +1506,22 @@ class MainApp : Application() {
 				BlockType.INPUT_DATA,
 				BlockType.START -> runBlock(b)
 
-				BlockType.EXIT,
+				BlockType.EXIT -> {}    // EXIT не исполняем явно
+
 				BlockType.SUB_PROJECT -> {
-				}    // EXIT не исполняем явно
+					val f = File(b.subProjectPath)
+					if (f.exists()) {
+						val sub = MainApp()
+						sub.importBlocksFromFile(f)
+						val outs = runSubProject(f, b/*, sub*/)
+						b.outputsData = outs.toMutableList()
+					} else {
+						b.outputsData = MutableList(b.outputCount) { mutableMapOf() }
+					}
+				}
+
+				BlockType.PROPERTIES -> {}
+
 			}
 		}
 

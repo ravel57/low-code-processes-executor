@@ -52,6 +52,7 @@ class BlockNode(
 	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf(),
 	var packagesNames: MutableList<String> = mutableListOf(),
 	private var mapKeySettings: MutableMap<String, MapAction> = mutableMapOf(),
+	var subProjectProps: MutableMap<String, Any> = mutableMapOf()
 ) : Pane() {
 
 	private val width = 150.0
@@ -234,7 +235,7 @@ class BlockNode(
 			font = Font("Consolas", 16.0)
 		}
 
-		if (blockType in arrayOf(BlockType.INPUT_DATA, BlockType.START)) {
+		if (blockType in arrayOf(BlockType.INPUT_DATA, BlockType.START, BlockType.PROPERTIES)) {
 			// Форматы
 			val formats = InputFormatType.entries
 			val toggleGroup = ToggleGroup()
@@ -249,25 +250,54 @@ class BlockNode(
 			}
 			val radioTab = Tab("Формат", radiosBox).apply { isClosable = false }
 
-			// Код
-			val codeArea = CodeArea().apply {
-				replaceText(code)
-				paragraphGraphicFactory = LineNumberFactory.get(this)
-				isWrapText = true
-				contextMenu = createCodeAreaContextMenu(this)
-				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
+			//                      FIXME
+			val (tabPane, codeArea) = if (blockType == BlockType.PROPERTIES) {
+				val propsBox = buildEditablePropertiesBox()
+				val propsTab = Tab("Свойства", propsBox).apply { isClosable = false }
+				Pair(TabPane(propsTab, radioTab), null)
+			} else {
+				// старое поведение для INPUT_DATA и START
+				val codeArea = CodeArea().apply {
+					replaceText(code)
+					paragraphGraphicFactory = LineNumberFactory.get(this)
+					isWrapText = true
+					contextMenu = createCodeAreaContextMenu(this)
+					style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
+				}
+				val codeScroll = VirtualizedScrollPane(codeArea)
+				VBox.setVgrow(codeScroll, Priority.ALWAYS)
+				val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
+				Pair(TabPane(codeTab, radioTab), codeArea)
 			}
-			val codeScroll = VirtualizedScrollPane(codeArea)
-			VBox.setVgrow(codeScroll, Priority.ALWAYS)
-			val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
-			val tabPane = TabPane(codeTab, radioTab)
+
 			VBox.setVgrow(tabPane, Priority.ALWAYS)
 			val saveButton = Button("Сохранить").apply {
 				setOnAction {
 					name = titleTextArea.text
 					label.text = name
 					inputFormat = formats[radioButtons.indexOfFirst { it.isSelected }]
-					code = codeArea.text
+
+					if (blockType == BlockType.PROPERTIES) {
+						val scrollPane = (tabPane.tabs[0].content as VBox).children[1] as ScrollPane
+						val rowsBox = scrollPane.content as VBox
+						val newProps = mutableListOf<String>()
+						val newData = mutableListOf<MutableMap<String, Any>>()
+						for (row in rowsBox.children) {
+							val box = row as HBox
+							val tfKey = box.children[0] as TextField
+							val tfVal = box.children[1] as TextField
+							val key = tfKey.text
+							newProps.add(key)
+							newData.add(mutableMapOf(key to tfVal.text))
+						}
+						outputNames = newProps
+						outputCount = newProps.size
+						outputsData = newData
+					} else {
+						val codeArea =
+							((tabPane.tabs[0].content as VBox).children[0] as VirtualizedScrollPane<*>).content as CodeArea
+						code = codeArea.text
+					}
 					recreateIOCircles()
 					dialog.close()
 				}
@@ -278,7 +308,7 @@ class BlockNode(
 				VBox.setVgrow(tabPane, Priority.ALWAYS)
 			}
 			dialog.scene = Scene(vbox, 720.0, 600.0)
-			Platform.runLater { codeArea.requestFocus() }
+			Platform.runLater { codeArea?.requestFocus() }
 			dialog.initModality(Modality.APPLICATION_MODAL)
 			dialog.showAndWait()
 		} else {
@@ -302,12 +332,62 @@ class BlockNode(
 			val configTab = Tab("Конфигурация входов и выходов", configBox).apply { isClosable = false }
 
 			val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
-			val docsTab = Tab("DataDocs", VBox(10.0, buildKeysPane()))
-				.apply { isClosable = false }
+			val docsTab = Tab("DataDocs", VBox(10.0, buildKeysPane())).apply { isClosable = false }
 			val tabPane = if (blockType != BlockType.SUB_PROJECT) {
 				TabPane(codeTab, docsTab, configTab)
 			} else {
-				TabPane(docsTab)
+				val tabs = mutableListOf<Tab>()
+				tabs += docsTab
+
+				// Загружаем подпроект
+				val subFile = File(subProjectPath)
+				if (subFile.exists()) {
+					val subApp = MainApp()
+					subApp.importBlocksFromFile(subFile)
+
+					// все блоки PROPERTIES
+					val propBlocks = subApp.blocks.filter { it.blockType == BlockType.PROPERTIES }
+
+					if (propBlocks.isNotEmpty()) {
+						val propsBox = VBox(8.0).apply {
+							padding = Insets(8.0)
+							children.add(Label("Свойства подпроекта:"))
+
+							propBlocks.forEach { propBlock ->
+								if (propBlock.outputNames.isNotEmpty()) {
+									children.add(Label("Блок: ${propBlock.name}").apply { style = "-fx-font-weight: bold" })
+								}
+								propBlock.outputNames.forEachIndexed { idx, propName ->
+									val tf = TextField().apply {
+										promptText = propName
+										// читаем сохранённое значение из subProjectProps
+										val existing = this@BlockNode.subProjectProps[propName] as? String
+										if (existing != null) text = existing
+
+										// при изменении — пишем в subProjectProps
+										textProperty().addListener { _, _, newValue ->
+											this@BlockNode.subProjectProps[propName] = newValue
+
+											// синхронизируем предпросмотр во внутреннем PROPERTIES
+											while (propBlock.outputsData.size <= idx) propBlock.outputsData.add(mutableMapOf())
+											propBlock.outputsData[idx] = mutableMapOf(propName to newValue)
+										}
+									}
+									val row = HBox(6.0, Label("$propName:"), tf).apply { alignment = Pos.CENTER_LEFT }
+									children.add(row)
+								}
+							}
+						}
+
+						val propsTab = Tab("Свойства", ScrollPane(propsBox).apply {
+							isFitToWidth = true
+							prefHeight = 220.0
+						}).apply { isClosable = false }
+						tabs.add(propsTab)
+					}
+				}
+
+				TabPane(*tabs.toTypedArray())
 			}
 			VBox.setVgrow(tabPane, Priority.ALWAYS)
 
@@ -453,6 +533,45 @@ class BlockNode(
 	}
 
 
+	// Новый редактор именно для PROPERTIES
+	private fun buildEditablePropertiesBox(): VBox {
+		val propsBox = VBox(4.0)
+		val scrollContent = VBox(4.0)
+		val scrollPane = ScrollPane(scrollContent).apply {
+			prefHeight = 180.0
+			isFitToWidth = true
+			vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
+		}
+		val addBtn = Button("+").apply {
+			setOnAction { addPropertyRow(scrollContent) }
+		}
+		val header = HBox(6.0, Label("Свойства:"), addBtn)
+		propsBox.children.addAll(header, scrollPane)
+
+		// заполняем из outputsData
+		outputsData.forEach { map ->
+			val (k, v) = map.entries.first()
+			addPropertyRow(scrollContent, k, v.toString())
+		}
+		if (scrollContent.children.isEmpty()) {
+			addPropertyRow(scrollContent)
+		}
+		return propsBox
+	}
+
+	// строка для пары ключ-значение
+	private fun addPropertyRow(container: VBox, keyText: String = "", valueText: String = "") {
+		val tfKey = TextField(keyText.ifBlank { "prop${container.children.size}" })
+		val tfVal = TextField(valueText)
+		lateinit var box: HBox
+		val delBtn = Button("–").apply {
+			setOnAction { if (container.children.size > 1) container.children.remove(box) }
+		}
+		box = HBox(6.0, tfKey, tfVal, delBtn).apply { alignment = Pos.CENTER_LEFT }
+		container.children.add(box)
+	}
+
+
 	fun recreateIOCircles() {
 		// Удалить старые кружки
 		children.removeAll(inputCircles)
@@ -517,9 +636,9 @@ class BlockNode(
 		this.prefHeight = newHeight
 
 		// Входы
-		if (blockType != BlockType.START && blockType != BlockType.INPUT_DATA) {
+		if (blockType !in arrayOf(BlockType.START, BlockType.INPUT_DATA, BlockType.PROPERTIES)) {
 			val step = newHeight / (inputCount + 1)
-			repeat(inputCount) { i ->
+			for (i in 0 until inputCount) {
 				val y = step * (i + 1)
 				val circle = Circle(0.0, y, 7.0, Color.LIGHTSKYBLUE).apply {
 					stroke = Color.DARKBLUE
@@ -729,7 +848,7 @@ class BlockNode(
 					.getOrNull(portIndex)
 					?: "in$portIndex"
 				val mp = (conn.from.outputsData
-					.getOrNull(conn.fromPort) as? Map<String,Any>)
+					.getOrNull(conn.fromPort) as? Map<String, Any>)
 					?: emptyMap()
 				inName to mp
 			}
