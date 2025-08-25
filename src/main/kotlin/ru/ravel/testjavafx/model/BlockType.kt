@@ -10,6 +10,6 @@ enum class BlockType(val displayName: String, val color: Color) {
 	INPUT_DATA("InputData", Color.LIGHTGRAY),
 	START("Start", Color.LIGHTGREEN),
 	EXIT("Exit", Color.LIGHTSALMON),
-	SUB_PROJECT("Проект", Color.YELLOWGREEN),
+	SUB_PROJECT("Проект", Color.GOLD),
 	PROPERTIES("Свойства", Color.TAN),
 }

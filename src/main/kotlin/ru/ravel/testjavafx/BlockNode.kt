@@ -865,7 +865,7 @@ class BlockNode(
 
 		for (compositeKey in compositeKeys) {
 			val tg = ToggleGroup()
-			val rbSkip = RadioButton("Пропустить").apply { toggleGroup = tg }
+			val rbSkip = RadioButton("Пропустить дальше").apply { toggleGroup = tg }
 			val rbRead = RadioButton("Чтение").apply { toggleGroup = tg }
 			val rbEdit = RadioButton("Редактирование").apply { toggleGroup = tg }
 			when (mapKeySettings.getOrPut(compositeKey) { MapAction.SKIP }) {

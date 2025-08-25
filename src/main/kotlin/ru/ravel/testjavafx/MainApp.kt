@@ -29,12 +29,24 @@ import org.graalvm.polyglot.Context
 import org.graalvm.polyglot.Value
 import org.graalvm.polyglot.proxy.ProxyObject
 import org.yaml.snakeyaml.Yaml
-import ru.ravel.testjavafx.model.*
+import ru.ravel.testjavafx.model.BlockSerialized
+import ru.ravel.testjavafx.model.BlockType
+import ru.ravel.testjavafx.model.BlocksData
+import ru.ravel.testjavafx.model.InputFormatType
 import java.io.File
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Paths
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.io.path.absolutePathString
 
 
 class MainApp : Application() {
@@ -64,6 +76,9 @@ class MainApp : Application() {
 		vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
 	}
 	private var lastEnsureVisible = 0L
+	private val executor = Executors.newFixedThreadPool(
+		Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+	)
 
 
 	override fun start(primaryStage: Stage) {
@@ -854,94 +869,144 @@ class MainApp : Application() {
 
 
 	private fun runButtonHandler() {
-		val incoming = mutableMapOf<BlockNode, MutableSet<BlockNode>>()
-		val outgoing = mutableMapOf<BlockNode, MutableList<BlockNode>>()
-		blocks.forEach {
-			incoming[it] = mutableSetOf()
-		}
-		connections.forEach { conn ->
-			incoming[conn.to]?.add(conn.from)
-			outgoing.computeIfAbsent(conn.from) { mutableListOf() }.add(conn.to)
-		}
-		val finished = mutableSetOf<BlockNode>()
-		// Найти цикл (если есть)
-		val cycle = findFirstCycle()
-		val cycleSet = cycle?.toSet() ?: emptySet()
+		// Запускаем весь оркестратор НЕ на FX-потоке, чтобы UI не подвисал,
+		// а Platform.runLater обновлял рамку "executing" в реальном времени.
+		Thread {
+			// Готовим граф зависимостей (как у вас)
+			val incoming = mutableMapOf<BlockNode, MutableSet<BlockNode>>()
+			val outgoing = mutableMapOf<BlockNode, MutableList<BlockNode>>()
+			blocks.forEach {
+				incoming[it] = mutableSetOf()
+			}
+			connections.forEach { conn ->
+				incoming[conn.to]!!.add(conn.from)
+				outgoing.computeIfAbsent(conn.from) { mutableListOf() }.add(conn.to)
+			}
 
-		fun runBlockRecursively(block: BlockNode) {
-			val inputConnections = connections.filter { it.to == block }
-			val allInputsFilled = inputConnections.all { conn ->
-				val src = conn.from
-				val port = conn.fromPort
-				val out = src.outputsData
-				if (out.size <= port) return@all false
-				if (src.blockType in arrayOf(BlockType.START, BlockType.INPUT_DATA))
-					return@all true
-				!isDataEmpty(out[port])
-			}
-			if (!allInputsFilled) {
-				return
-			}
-			Platform.runLater { block.selected = true }
-			runBlock(block)
-			Platform.runLater { block.selected = false }
-			finished.add(block)
-			outgoing[block]?.forEach { child ->
-				if (child !in cycleSet) {
-					runBlockRecursively(child)
-				}
-			}
-		}
+			// Уже выполненные узлы
+			val executed = ConcurrentHashMap.newKeySet<BlockNode>()
 
-		blocks.filter {
-			it !in cycleSet && incoming[it]?.all { p -> p !in cycleSet } == true
-		}.forEach {
-			runBlockRecursively(it)
-		}
-		if (!cycle.isNullOrEmpty()) {
-			while (true) {
-				// 1. Проходим все блоки цикла (ваша логика)
-				for (block in cycle) {
-					Platform.runLater { block.executing = true }
-					runBlock(block)
-					Platform.runLater { block.executing = false }
+			// Вспомогательная фаза: параллельный запуск всех узлов,
+			// которые можно выполнить при данном множестве `executed`.
+			fun runPhase(exclude: Set<BlockNode>) {
+				// Кандидаты этой фазы (не выполнены и не исключены — например, узлы цикла)
+				val candidates = blocks.filter { it !in executed && it !in exclude }.toSet()
+				if (candidates.isEmpty()) return
+
+				// Счётчик "оставшихся невыполненных родителей" для каждого кандидата
+				val deps = ConcurrentHashMap<BlockNode, AtomicInteger>()
+				candidates.forEach { node ->
+					val notDoneParents = incoming[node]?.count { it !in executed } ?: 0
+					deps[node] = AtomicInteger(notDoneParents)
 				}
 
-				// 2. Триггерим все следующие блоки вне цикла после каждого прохода
-				val exitBlocks = mutableSetOf<BlockNode>()
-				outgoing.forEach { (from, outs) ->
-					if (from in cycleSet) {
-						outs.filter { it !in cycleSet }.forEach { exitBlocks.add(it) }
+				// Очередь готовых к старту
+				val ready = ConcurrentLinkedQueue<BlockNode>()
+				candidates.forEach { if (deps[it]!!.get() == 0) ready.add(it) }
+
+				// Если ни одного узла запустить нельзя — выходим из фазы
+				if (ready.isEmpty()) return
+
+				// Счётчик активных задач, чтобы корректно дождаться завершения фазы
+				val inFlight = AtomicInteger(0)
+				val done = CountDownLatch(1)
+
+				fun submitNode(node: BlockNode) {
+					inFlight.incrementAndGet()
+					executor.submit {
+						// Показываем "красную" обводку
+						Platform.runLater { node.executing = true }
+						try {
+							runBlock(node) // ваш существующий синхронный вызов
+						} finally {
+							// Снимаем "красную" обводку
+							Platform.runLater { node.executing = false }
+							executed.add(node)
+
+							// Освобождаем потомков
+							outgoing[node]?.forEach { child ->
+								if (child in candidates) {
+									val left = deps[child]!!.decrementAndGet()
+									if (left == 0) {
+										ready.add(child)
+									}
+								}
+							}
+
+							// Если мы были последними и очередь пуста — закрываем фазу
+							if (inFlight.decrementAndGet() == 0 && ready.isEmpty()) {
+								done.countDown()
+							}
+						}
 					}
 				}
-				exitBlocks.forEach { nextBlock ->
-					// Проверяем что все входящие из цикла "готовы"
-					val fromCycle = incoming[nextBlock]?.filter { it in cycleSet } ?: emptyList()
-					if (fromCycle.all { it in finished || cycleSet.contains(it) }) {
-						runBlockRecursively(nextBlock)
+
+				// Раздаём стартовые задачи
+				while (true) {
+					val n = ready.poll() ?: break
+					submitNode(n)
+				}
+
+				// Координатор: пока в процессе появляются новые готовые узлы — запускаем их
+				while (inFlight.get() > 0 || !ready.isEmpty()) {
+					var scheduled = false
+					while (true) {
+						val n = ready.poll() ?: break
+						submitNode(n)
+						scheduled = true
+					}
+					if (!scheduled && inFlight.get() > 0) {
+						// Немного уступим CPU, чтобы дети успели попасть в очередь
+						Thread.sleep(5)
 					}
 				}
 
-				// 3. Условие выхода (ваше)
-				if (cycle.all { block ->
+				// На случай гоночных условий — ждём явного сигнала окончания
+				done.await()
+			}
+
+			// 1) Находим один цикл, как у вас
+			val cycle = findFirstCycle()
+			val cycleSet = cycle?.toSet() ?: emptySet()
+
+			// 2) Фаза 1: параллельно выполняем всё вне цикла, что уже готово (корни DAG и т.д.)
+			runPhase(exclude = cycleSet)
+
+			// 3) Узлы цикла — по вашей логике (оставлено последовательно)
+			if (!cycle.isNullOrEmpty()) {
+				while (true) {
+					for (b in cycle) {
+						Platform.runLater { b.executing = true }
+						runBlock(b)
+						Platform.runLater { b.executing = false }
+						executed.add(b) // помечаем, чтобы дети разблокировались в следующей фазе
+					}
+
+					// Ваше исходное условие завершения цикла
+					val shouldBreak = cycle.all { block ->
 						val pairs = block.connectedLines
 							.filter { it.to != block }
-							.filter { it.to in cycle }
+							.filter { it.to in cycleSet }
 							.map { Pair(it.to, it.from) }
 						pairs.all { p ->
 							val to = p.first
 							val from = p.second
-							val list = List(to.connectedLines.filter { it.to == from }.size) { index -> index }
-							to.outputsData.filterIndexed { index, _ -> index in list }.all { it.isEmpty() }
+							val list = List(to.connectedLines.filter { it.to == from }.size) { idx -> idx }
+							to.outputsData
+								.filterIndexed { index, _ -> index in list }
+								.all { it.isEmpty() }
 						}
-					}) {
-					break
+					}
+					if (shouldBreak) break
 				}
 			}
-		}
-		currentProjectFile?.let { projectFile ->
-			saveOutputsData(projectFile)
-		}
+
+			// 4) Фаза 2: после завершения цикла параллелим всё остальное (дети узлов цикла и т.д.)
+			runPhase(exclude = emptySet())
+
+			// 5) Сохраняем результаты
+			currentProjectFile?.let { saveOutputsData(it) }
+		}.start()
 	}
 
 
@@ -955,19 +1020,20 @@ class MainApp : Application() {
 				block.connectedLines
 					.filter { it.to == block }
 					.sortedBy { it.toPort }
-					.forEach { connection ->
-						val name = block.inputNames[connection.toPort]
-						inputDataMap[name] = connection.from.outputsData[connection.fromPort]
+					.forEach { c ->
+						inputDataMap[block.inputNames[c.toPort]] = c.from.outputsData.getOrNull(c.fromPort)
+							?: mutableMapOf<String, Any>()
 					}
-				val outputs = (0 until block.outputCount)
-					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
-					.toMutableMap()
+
+				// создаём пустые выходы под все outputNames
+				val outputs = block.outputNames.associateWith { mutableMapOf<String, Any>() }.toMutableMap()
 				inputDataMap.putAll(outputs)
 				try {
 					block.code.runGroovyScript(inputDataMap)
-					outputs.forEach { (_, value) ->
-						block.outputsData.add(value)
-					}
+					// гарантируем наличие данных под каждый выход
+					block.outputsData = block.outputNames.map { name ->
+						outputs[name] ?: mutableMapOf()
+					}.toMutableList()
 				} catch (e: Exception) {
 					System.err.println("${e.localizedMessage}\n${e.stackTraceToString()}")
 					Platform.runLater {
@@ -986,20 +1052,16 @@ class MainApp : Application() {
 					.filter { it.to == block }
 					.sortedBy { it.toPort }
 					.forEach { c ->
-						inputDataMap[block.inputNames[c.toPort]] = c.from.outputsData[c.fromPort]
+						inputDataMap[block.inputNames[c.toPort]] =
+							c.from.outputsData.getOrNull(c.fromPort) ?: mutableMapOf<String, Any>()
 					}
-				val outputs = (0 until block.outputCount)
-					.associate { index -> block.outputNames[index] to mutableMapOf<String, Any>() }
-					.toMutableMap()
+				val outputs = block.outputNames.associateWith { mutableMapOf<String, Any>() }.toMutableMap()
 				inputDataMap.putAll(outputs)
 				try {
-					val pyOutputs: Map<String, Any?> = block.code.runPythonScript(block, inputDataMap, outputs)
-					block.outputNames.forEach { name ->
-						block.outputsData.add(pyOutputs[name] as? MutableMap<String, Any> ?: mutableMapOf())
-					}
-					outputs.forEach { (_, value) ->
-						block.outputsData.add(value)
-					}
+					val pyOutputs = block.code.runPythonScript(block, inputDataMap, outputs)
+					block.outputsData = block.outputNames.map { name ->
+						(pyOutputs[name] as? MutableMap<String, Any>) ?: outputs[name] ?: mutableMapOf()
+					}.toMutableList()
 				} catch (e: Exception) {
 					System.err.println("${e.localizedMessage}\n${e.stackTraceToString()}")
 					Platform.runLater {
@@ -1086,16 +1148,35 @@ class MainApp : Application() {
 			BlockType.SUB_PROJECT -> {
 				val file = File(block.subProjectPath)
 				if (file.exists()) {
-					val prev = block.outputsData
-					block.outputsData = block.subProjectProps
-						.map { (k, v) -> mutableMapOf(k to v) }.toMutableList()
+					// собираем входные данные: либо subProjectProps, либо реальные inputs
+					val inputs: MutableList<MutableMap<String, Any>> = mutableListOf()
+					if (block.subProjectProps.isNotEmpty()) {
+						inputs.addAll(block.subProjectProps.map { (k, v) -> mutableMapOf(k to v) })
+					} else {
+						// берем данные от соединённых блоков
+						block.connectedLines
+							.filter { it.to == block }
+							.sortedBy { it.toPort }
+							.forEach { c ->
+								val value = c.from.outputsData.getOrNull(c.fromPort) ?: mutableMapOf()
+								inputs.add(value)
+							}
+					}
+					// если вообще ничего нет, но у блока есть входы — инициализируем пустыми картами
+					if (inputs.isEmpty() && block.inputCount > 0) {
+						repeat(block.inputCount) { inputs.add(mutableMapOf()) }
+					}
+
+					// пробрасываем на выходы подпроекта
+					block.outputsData = inputs
+
+					// запускаем сам подпроект
 					val outs = runSubProject(file, block)
 					block.outputsData = outs.toMutableList() // наружу — результаты
 				} else {
 					block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
 				}
 			}
-
 
 			BlockType.PROPERTIES -> {
 				// Убедимся, что есть outputsData под все выходы
@@ -1112,8 +1193,6 @@ class MainApp : Application() {
 					mutableMapOf(name to value)
 				}.toMutableList()
 			}
-
-
 		}
 	}
 
@@ -1288,8 +1367,10 @@ class MainApp : Application() {
 		bindings: Map<String, Any?> = emptyMap(),
 		outputs: MutableMap<String, MutableMap<String, Any>>
 	): Map<String, Any?> {
-		val venvDir = "./run/python/${block.serializedId}_${block.hashCode()}"
-		ProcessBuilder("python3", "-m", "venv", venvDir)
+		val tmp = "run/python/${block.serializedId}_${block.hashCode()}"
+		val venvDirPath = Paths.get("").toAbsolutePath().resolve(tmp).apply { Files.createDirectories(this) }
+		val venvDir = venvDirPath.absolutePathString()
+		ProcessBuilder(PYTHON, "-m", "venv", venvDir)
 			.redirectErrorStream(true)
 			.start()
 			.waitFor()
@@ -1320,9 +1401,13 @@ class MainApp : Application() {
 				|
 				|print(json.dumps({${outputs.map { "\"${it.key}\": ${it.key}" }.joinToString(", ")}}))
 				""".trimMargin()
-		val pythonProc = ProcessBuilder(pythonPath, "-c", fullScript)
+		val scriptPath = File(venvDir, "script.py").apply { writeText(fullScript, StandardCharsets.UTF_8) }
+		val pythonProc = ProcessBuilder(pythonPath, scriptPath.toString())
 			.redirectErrorStream(true)
-			.apply { environment()[PYTHON_PARAMS_VARIABLE] = paramsJson }
+			.apply {
+				environment()[PYTHON_PARAMS_VARIABLE] = paramsJson
+				environment()["PYTHONIOENCODING"] = "utf-8"
+			}
 			.start()
 		val readText = pythonProc.inputStream.bufferedReader().readText()
 		File(venvDir).deleteRecursively()
@@ -1338,6 +1423,7 @@ class MainApp : Application() {
 		return result
 	}
 
+
 	/**
 	 * Выполняет подпроект так же, как runButtonHandler(),
 	 * но полностью «в памяти» и без GUI.
@@ -1347,13 +1433,12 @@ class MainApp : Application() {
 	private fun runSubProject(file: File, parentBlock: BlockNode): List<MutableMap<String, Any>> {
 		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
 		val subDir = file.parentFile
+		val om = ObjectMapper()
 
 		/* --- 1. Строим внутренние BlockNode без UI --- */
 		val idToBlock = mutableMapOf<UUID, BlockNode>()
 		val blocks = data.blocks.map { b ->
-			val codeText = b.codeFile
-				?.let { File(subDir, it).readText() }
-				?: b.codeFile.orEmpty()
+			val codeText = b.codeFile?.let { File(subDir, it).readText() } ?: b.codeFile.orEmpty()
 			val bn = BlockNode(
 				x = 0.0, y = 0.0,
 				name = b.name,
@@ -1372,28 +1457,20 @@ class MainApp : Application() {
 			bn
 		}.toMutableList()
 
-		/* --- 1.1. ЗАГРУЖАЕМ PROPERTIES из ресурсов подпроекта --- */
+		/* --- 1.1. Загружаем PROPERTIES из ресурсов подпроекта --- */
 		data.blocks.forEach { b ->
 			if (BlockType.valueOf(b.blockType) == BlockType.PROPERTIES && b.codeFile != null) {
 				val bn = idToBlock[b.id] ?: return@forEach
 				val propsFile = File(subDir, b.codeFile)
-				if (propsFile.exists() && propsFile.length() > 0) {
+				bn.outputsData = if (propsFile.exists() && propsFile.length() > 0) {
 					try {
-						val props: Map<String, Any> =
-							ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
-						val byName = props
-						bn.outputsData = bn.outputNames.map { name ->
-							mutableMapOf<String, Any>(name to (byName[name] ?: ""))
-						}.toMutableList()
+						val props: Map<String, Any> = ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
+						bn.outputNames.map { name -> mutableMapOf<String, Any>(name to (props[name] ?: "")) }.toMutableList()
 					} catch (_: Exception) {
-						bn.outputsData = bn.outputNames.map { name ->
-							mutableMapOf<String, Any>(name to "")
-						}.toMutableList()
+						bn.outputNames.map { name -> mutableMapOf<String, Any>(name to "") }.toMutableList()
 					}
 				} else {
-					bn.outputsData = bn.outputNames.map { name ->
-						mutableMapOf<String, Any>(name to "")
-					}.toMutableList()
+					bn.outputNames.map { name -> mutableMapOf<String, Any>(name to "") }.toMutableList()
 				}
 			}
 		}
@@ -1414,10 +1491,8 @@ class MainApp : Application() {
 				val v = propsByName[propName]
 				if (v != null) {
 					propBlock.outputsData[idx] = mutableMapOf(propName to v)
-				} /*else if (propBlock.outputsData[idx].isEmpty()) {
-					propBlock.outputsData[idx] = mutableMapOf(propName to "")
-				}*/
-				// ВАЖНО: если v == null — НЕ трогаем значение из ресурсов!
+				}
+				// если v == null — оставляем значение из ресурсов
 			}
 		}
 
@@ -1442,7 +1517,7 @@ class MainApp : Application() {
 		val entryBlocks = blocks.filter {
 			when (it.blockType) {
 				BlockType.START -> true
-				BlockType.INPUT_DATA -> it.code.isBlank()
+				BlockType.INPUT_DATA -> it.code.isBlank() // пустой INPUT_DATA используем как внешний вход
 				else -> false
 			}
 		}.toMutableList()
@@ -1466,7 +1541,8 @@ class MainApp : Application() {
 				}
 			}
 
-		val inputStubsNeeded = parentBlock.inputCount - entryBlocks.size
+		// если входов в подпроекте меньше, чем у блока-обёртки — создаём «заглушки»
+		val inputStubsNeeded = (parentBlock.inputCount - entryBlocks.size).coerceAtLeast(0)
 		repeat(inputStubsNeeded) {
 			val stub = BlockNode(
 				x = 0.0, y = 0.0,
@@ -1474,13 +1550,14 @@ class MainApp : Application() {
 				blockType = BlockType.INPUT_DATA,
 				inputCount = 0,
 				outputCount = 1,
-				inputFormat = InputFormatType.JSON,      // или YAML
+				inputFormat = InputFormatType.JSON,
 				outputsData = mutableListOf()
 			)
 			blocks.add(stub)
 			entryBlocks.add(stub)
 		}
 
+		/* --- 4. Вспомогалки --- */
 		fun isDataEmpty(data: Any?): Boolean = when (data) {
 			null -> true
 			is Map<*, *> -> data.isEmpty()
@@ -1506,52 +1583,73 @@ class MainApp : Application() {
 				BlockType.INPUT_DATA,
 				BlockType.START -> runBlock(b)
 
-				BlockType.EXIT -> {}    // EXIT не исполняем явно
-
 				BlockType.SUB_PROJECT -> {
 					val f = File(b.subProjectPath)
 					if (f.exists()) {
-						val sub = MainApp()
-						sub.importBlocksFromFile(f)
-						val outs = runSubProject(f, b/*, sub*/)
+						// Рекурсия разрешена: просто заходим внутрь ещё раз
+						val outs = runSubProject(f, b)
 						b.outputsData = outs.toMutableList()
 					} else {
 						b.outputsData = MutableList(b.outputCount) { mutableMapOf() }
 					}
 				}
 
-				BlockType.PROPERTIES -> {}
-
-			}
-		}
-
-		// топологическая сортировка «в лоб»
-		val incoming = mutableMapOf<BlockNode, MutableSet<BlockNode>>()
-		val outgoing = mutableMapOf<BlockNode, MutableList<BlockNode>>()
-		blocks.forEach { incoming[it] = mutableSetOf() }
-		connections.forEach { c ->
-			incoming[c.to]?.add(c.from)
-			outgoing.computeIfAbsent(c.from) { mutableListOf() }.add(c.to)
-		}
-		val queue = ArrayDeque(blocks.filter { incoming[it]?.isEmpty() == true })
-		while (queue.isNotEmpty()) {
-			val b = queue.removeFirst()
-			// ждём, пока все входы заполнятся
-			val ready = connections.filter { it.to == b }
-				.all { c ->
-					c.from.outputsData.size > c.fromPort && (c.from.blockType == BlockType.START || !isDataEmpty(c.from.outputsData[c.fromPort]))
+				BlockType.PROPERTIES -> { /* уже загружены/проброшены */
 				}
-			if (!ready) {
-				continue
-			}
-			execute(b)
-			outgoing[b]?.forEach { child ->
-				incoming[child]?.remove(b)
-				if (incoming[child]?.isEmpty() == true) queue.add(child)
+
+				BlockType.EXIT -> { /* не исполняем явно */
+				}
 			}
 		}
 
-		/* --- 5. Ищем EXIT и возвращаем его входные данные --- */
+		// Быстрый доступ к ребрам
+		val incoming = mutableMapOf<BlockNode, MutableList<Connection>>().apply {
+			blocks.forEach { this[it] = mutableListOf() }
+			connections.forEach { c -> this[c.to]!!.add(c) }
+		}
+
+		/* --- 4.1 Подпись входов блока: JSON от упорядоченных по toPort карт родителя --- */
+		val lastSig = mutableMapOf<BlockNode, String?>()
+		fun inputSignature(b: BlockNode): String {
+			val ins = incoming[b]!!.sortedBy { it.toPort }.map { c ->
+				@Suppress("UNCHECKED_CAST")
+				(c.from.outputsData.getOrNull(c.fromPort) as? Map<String, Any>) ?: emptyMap()
+			}
+			return om.writeValueAsString(ins)
+		}
+
+		/* --- 4.2 Итеративный планировщик (фикс-пойнт) вместо топологической сортировки --- */
+		while (true) {
+			var progressed = false
+
+			for (b in blocks) {
+				if (b.blockType == BlockType.EXIT) continue
+
+				val ins = incoming[b]!!
+				val anyReady =
+					ins.isEmpty() || ins.any { c ->
+						val src = c.from
+						val portOk = src.outputsData.size > c.fromPort
+						val hasData = portOk && !isDataEmpty(src.outputsData[c.fromPort])
+						// узлы START/INPUT_DATA считаем готовыми источниками
+						hasData || src.blockType in arrayOf(BlockType.START, BlockType.INPUT_DATA)
+					}
+
+				if (!anyReady) continue
+
+				val sig = inputSignature(b)
+				if (lastSig[b] != sig) {
+					// входы изменились — исполняем
+					execute(b)
+					lastSig[b] = sig
+					progressed = true
+				}
+			}
+
+			if (!progressed) break // стабилизация: больше ничего не меняется
+		}
+
+		/* --- 5. Собираем выходы из EXIT-блоков (в порядке по координатам, как у тебя) --- */
 		val exitBlocks = blocks
 			.filter { it.blockType == BlockType.EXIT }
 			.sortedWith(compareBy<BlockNode> { it.layoutY }.thenBy { it.layoutX })
@@ -1593,6 +1691,26 @@ class MainApp : Application() {
 
 	companion object {
 		private const val PYTHON_PARAMS_VARIABLE = "PARAMS_JSON"
+		private val PYTHON = getPython()
+
+
+		private fun getPython(): String {
+			val commands = listOf("python3", "python", "py")
+			for (cmd in commands) {
+				try {
+					val process = ProcessBuilder(cmd, "--version")
+						.redirectErrorStream(true)
+						.start()
+					val output = process.inputStream.bufferedReader().readText().trim()
+					if (output.isNotEmpty() && !output.startsWith("Python was not found;")) {
+						return cmd
+					}
+				} catch (_: Exception) {
+				}
+			}
+			throw RuntimeException("Python не найден")
+		}
+
 
 		@JvmStatic
 		fun main(args: Array<String>) {
