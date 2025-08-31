@@ -83,7 +83,8 @@ class MainApp : Application() {
 	private val redoStack: Deque<Command> = ArrayDeque()
 	private var lastPressX: Double = 0.0
 	private var lastPressY: Double = 0.0
-
+	private var worldOffsetX = 0.0
+	private var worldOffsetY = 0.0
 
 	override fun start(primaryStage: Stage) {
 		stage = primaryStage
@@ -1284,51 +1285,44 @@ class MainApp : Application() {
 	}
 
 
-	private fun ensureBlockVisible(block: BlockNode, margin: Double = 80.0, extendStep: Double = 200.0) {
-		val now = System.currentTimeMillis()
-		if (now - lastEnsureVisible < 180) return
-		lastEnsureVisible = now
+	private fun ensureBlockVisible(@Suppress("UNUSED_PARAMETER") trigger: BlockNode? = null) {
+		val margin = 200.0
+		if (blocks.isEmpty()) return
 
-		val right = block.layoutX + block.width
-		val bottom = block.layoutY + block.height
-		var changed = false
+		// --- 1) Экстенты «мира» в логических координатах блоков
+		val minX = blocks.minOf { it.layoutX }
+		val minY = blocks.minOf { it.layoutY }
+		val maxX = blocks.maxOf { it.layoutX + it.boundsInLocal.width }
+		val maxY = blocks.maxOf { it.layoutY + it.boundsInLocal.height }
 
-		if (right + margin > contentPane.width) {
-			contentPane.prefWidth = contentPane.width + extendStep
-			changed = true
-		}
-		if (bottom + margin > contentPane.height) {
-			contentPane.prefHeight = contentPane.height + extendStep
-			changed = true
-		}
-		if (block.layoutX - margin < 0) {
-			val shift = extendStep
-			blocks.forEach { it.layoutX += shift }
-			connections.forEach { conn ->
-				conn.line.startX += shift
-				conn.line.endX += shift
+		// --- 2) Если есть отрицательные координаты — сдвигаем визуально весь «мир» внутрь положительной области
+		val newOffsetX = if (minX < 0.0) -minX + margin else 0.0
+		val newOffsetY = if (minY < 0.0) -minY + margin else 0.0
+
+		if (newOffsetX != worldOffsetX || newOffsetY != worldOffsetY) {
+			worldOffsetX = newOffsetX
+			worldOffsetY = newOffsetY
+			// Сдвигаем все узлы рабочего поля (кроме сетки) одним translate,
+			// не трогая их layoutX/layoutY и биндинги линий.
+			contentPane.children.forEach { node ->
+				if (node !== gridCanvas) {
+					node.translateX = worldOffsetX
+					node.translateY = worldOffsetY
+				}
 			}
-			contentPane.prefWidth = contentPane.width + shift
-			changed = true
 		}
-		if (block.layoutY - margin < 0) {
-			val shift = extendStep
-			blocks.forEach { it.layoutY += shift }
-			connections.forEach { conn ->
-				conn.line.startY += shift
-				conn.line.endY += shift
-			}
-			contentPane.prefHeight = contentPane.height + shift
-			changed = true
+
+		// --- 3) Реально расширяем скроллируемую область под ВЕСЬ диапазон (и слева/сверху, и справа/снизу)
+		val widthNeeded  = (maxX - minX) + 2 * margin
+		val heightNeeded = (maxY - minY) + 2 * margin
+
+		// Правый край: если тащим вправо — maxX растёт, widthNeeded растёт → расширяем prefWidth
+		if (widthNeeded > contentPane.prefWidth) {
+			contentPane.prefWidth = widthNeeded
 		}
-		if (changed) {
-			gridCanvas.widthProperty().unbind()
-			gridCanvas.heightProperty().unbind()
-			gridCanvas.width = contentPane.prefWidth
-			gridCanvas.height = contentPane.prefHeight
-			gridCanvas.widthProperty().bind(contentPane.widthProperty())
-			gridCanvas.heightProperty().bind(contentPane.heightProperty())
-			drawGrid(gridCanvas)
+		// Нижний край: аналогично для высоты
+		if (heightNeeded > contentPane.prefHeight) {
+			contentPane.prefHeight = heightNeeded
 		}
 	}
 
@@ -1362,7 +1356,8 @@ class MainApp : Application() {
 
 
 	private fun String.runGroovyScript(bindings: Map<String, Any?> = emptyMap()): Any? {
-		val shell = GroovyShell()
+		val cl = this::class.java.classLoader
+		val shell = GroovyShell(cl)
 		val binding = shell.context
 		for ((k, v) in bindings) {
 			binding.setProperty(k, v)
@@ -1790,7 +1785,7 @@ class MainApp : Application() {
 		if (!this::stage.isInitialized) {
 			return
 		}
-		val base = currentProjectFile?.name ?: "Low code processes executor"
+		val base = currentProjectFile?.name?.removeSuffix(".json") ?: "Low code processes executor"
 		stage.title = if (isDirty) "• $base" else base
 	}
 
@@ -1954,7 +1949,7 @@ class MainApp : Application() {
 
 
 		private fun getPython(): String {
-			val commands = listOf("python3", "python", "py")
+			val commands = listOf("python", "py", "python3")
 			for (cmd in commands) {
 				try {
 					val process = ProcessBuilder(cmd, "--version")

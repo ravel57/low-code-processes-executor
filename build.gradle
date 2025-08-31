@@ -26,10 +26,13 @@ dependencies {
 	implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.23'
 	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2'
 	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2'
+
 	implementation 'org.apache.groovy:groovy:4.0.26'
 	implementation 'org.apache.groovy:groovy-jsr223:4.0.26'
-	implementation "org.apache.groovy:groovy-json:4.0.23"
-	implementation "org.apache.groovy:groovy-xml:4.0.23"
+	implementation 'org.apache.groovy:groovy-json:4.0.23'
+	implementation 'org.apache.groovy:groovy-xml:4.0.23'
+	implementation 'org.apache.groovy:groovy-sql:4.0.23'
+	implementation 'org.postgresql:postgresql:42.7.7'
 	implementation "org.graalvm.js:js:24.2.1"
 	runtimeOnly 'org.graalvm.js:js-scriptengine:24.2.1'
 	implementation 'org.graalvm.polyglot:polyglot:24.2.1'
