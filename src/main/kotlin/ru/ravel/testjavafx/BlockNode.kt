@@ -52,7 +52,8 @@ class BlockNode(
 	var outputsData: MutableList<MutableMap<String, Any>> = mutableListOf(),
 	var packagesNames: MutableList<String> = mutableListOf(),
 	private var mapKeySettings: MutableMap<String, MapAction> = mutableMapOf(),
-	var subProjectProps: MutableMap<String, Any> = mutableMapOf()
+	var subProjectProps: MutableMap<String, Any> = mutableMapOf(),
+	var endpoint: String = "",
 ) : Pane() {
 
 	private val width = 150.0

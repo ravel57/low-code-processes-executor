@@ -1,6 +1,5 @@
 package ru.ravel.testjavafx
 
-//import javafx.scene.web.WebView
 import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
@@ -79,9 +78,14 @@ class MainApp : Application() {
 	private val executor = Executors.newFixedThreadPool(
 		Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
 	)
+	private lateinit var stage: Stage
+	private var isDirty = false
+	private var suppressDirty = false
+	private var springProcess: Process? = null
 
 
 	override fun start(primaryStage: Stage) {
+		stage = primaryStage
 		drawGrid(gridCanvas, 10.0)
 		gridCanvas.widthProperty().bind(contentPane.widthProperty())
 		gridCanvas.heightProperty().bind(contentPane.heightProperty())
@@ -173,28 +177,31 @@ class MainApp : Application() {
 
 		val newProjectButton = Button("Новый проект").apply {
 			setOnAction {
+				if (!confirmSaveIfDirty()) return@setOnAction
 				// Очищаем всё
 				blocks.clear()
 				connections.clear()
 				contentPane.children.removeIf { it is BlockNode || it is Line }
 				currentProjectFile = null
-				primaryStage.title = "Low code processes executor"
+				clearDirty()
+				updateTitle()
 			}
 		}
 
 		val openProjectButton = Button("Открыть проект").apply {
 			setOnAction {
-				val fileChooser = FileChooser()
-				fileChooser.title = "Открыть проект"
-				fileChooser.extensionFilters.addAll(
-					FileChooser.ExtensionFilter("JSON", "*.json"),
-				)
-				val file = fileChooser.showOpenDialog(primaryStage)
+				if (!confirmSaveIfDirty()) return@setOnAction
+				val fileChooser = FileChooser().apply {
+					title = "Открыть проект"
+					extensionFilters.add(FileChooser.ExtensionFilter("JSON", "*.json"))
+				}
+				val file = fileChooser.showOpenDialog(stage)
 				if (file != null) {
 					importBlocksFromFile(file)
 					importOutputsData(file)
 					currentProjectFile = file
-					primaryStage.title = currentProjectFile?.name ?: "Low code processes executor"
+					clearDirty()
+					updateTitle()
 				}
 			}
 		}
@@ -203,6 +210,7 @@ class MainApp : Application() {
 			setOnAction {
 				if (currentProjectFile != null) {
 					exportBlocksToFile(currentProjectFile!!)
+					updateTitle()
 				} else {
 					val fileChooser = FileChooser()
 					fileChooser.title = "Сохранить проект"
@@ -211,7 +219,7 @@ class MainApp : Application() {
 					if (file != null) {
 						exportBlocksToFile(file)
 						currentProjectFile = file
-						primaryStage.title = currentProjectFile?.name ?: "Low code processes executor"
+						updateTitle()
 					}
 				}
 			}
@@ -242,6 +250,7 @@ class MainApp : Application() {
 						conn.to.connectedLines.remove(conn)
 						(conn.line.parent as? Pane)?.children?.remove(conn.line)
 						selectedConnection = null
+						markDirty()
 					}
 				}
 				// Ctrl+S для сохранения
@@ -272,6 +281,11 @@ class MainApp : Application() {
 				}
 			}
 		}
+
+		primaryStage.setOnCloseRequest { ev ->
+			if (!confirmSaveIfDirty()) ev.consume()
+		}
+		updateTitle()
 
 //		val webView = WebView()
 //		webView.engine.loadContent("<h1>Hello, World!</h1>")
@@ -317,6 +331,11 @@ class MainApp : Application() {
 		block.onMove = { ensureBlockVisible(block) }
 		parent.children.add(block)
 		setupHandlersForBlock(block)
+		block.onMove = {
+			ensureBlockVisible(block)
+			markDirty()
+		}
+		markDirty()
 		return block
 	}
 
@@ -376,6 +395,7 @@ class MainApp : Application() {
 						BlockType.MAPPING_GROOVY -> "groovy"
 						BlockType.MAPPING_PYTHON -> "py"
 						BlockType.MAPPING_JAVA_SCRIPT -> "js"
+						BlockType.FORM -> "html"
 						else -> "txt"
 					}
 					val f = File(resourcesDir, "$baseName.$ext")
@@ -413,210 +433,224 @@ class MainApp : Application() {
 			ObjectMapper().writerWithDefaultPrettyPrinter()
 				.writeValueAsString(blocksData)
 		)
+		clearDirty()
 	}
 
 	fun importBlocksFromFile(file: File) {
-		currentProjectFile = file
-		updateBlocks()
-		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
-		val projectDir = file.parentFile ?: File(".")
+		suppressDirty = true
+		try {
+			currentProjectFile = file
+			updateBlocks()
+			val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
+			val projectDir = file.parentFile ?: File(".")
 //		val resourcesDirName = "${file.nameWithoutExtension}_resources"
 //		val resourcesDir = File(projectDir, resourcesDirName)
 
-		// Очистка
-		blocks.clear()
-		connections.clear()
-		(scrollPane.content as? Pane)?.children?.removeIf { it is BlockNode || it is Line }
+			// Очистка
+			blocks.clear()
+			connections.clear()
+			(scrollPane.content as? Pane)?.children?.removeIf { it is BlockNode || it is Line }
 
-		val idToBlock = mutableMapOf<UUID, BlockNode>()
-		data.blocks.forEach { b ->
-			val blockType = try {
-				BlockType.valueOf(b.blockType)
-			} catch (_: Exception) {
-				BlockType.MAPPING_GROOVY
-			}
-			val defaultInputCount = when (blockType) {
-				BlockType.START, BlockType.INPUT_DATA -> 0
-				BlockType.SUB_PROJECT -> b.inputCount // берём как есть, потом adjustProjectNodeIO всё поправит
-				else -> b.inputCount.coerceAtLeast(1)
-			}
-			val defaultOutputCount = when (blockType) {
-				BlockType.EXIT -> 0
-				BlockType.SUB_PROJECT -> b.outputCount
-				else -> b.outputCount.coerceAtLeast(1)
-			}
-			// читаем код из файла, если указан
-			val code = b.codeFile?.let { File(projectDir, it).readText() } ?: ""
+			val idToBlock = mutableMapOf<UUID, BlockNode>()
+			data.blocks.forEach { b ->
+				val blockType = try {
+					BlockType.valueOf(b.blockType)
+				} catch (_: Exception) {
+					BlockType.MAPPING_GROOVY
+				}
+				val defaultInputCount = when (blockType) {
+					BlockType.START, BlockType.INPUT_DATA -> 0
+					BlockType.SUB_PROJECT -> b.inputCount // берём как есть, потом adjustProjectNodeIO всё поправит
+					else -> b.inputCount.coerceAtLeast(1)
+				}
+				val defaultOutputCount = when (blockType) {
+					BlockType.EXIT -> 0
+					BlockType.SUB_PROJECT -> b.outputCount
+					else -> b.outputCount.coerceAtLeast(1)
+				}
+				// читаем код из файла, если указан
+				val code = b.codeFile?.let { File(projectDir, it).readText() } ?: ""
 
-			// создаём BlockNode как раньше, но передаём код и dataDocs
-			val block = BlockNode(
-				x = b.x,
-				y = b.y,
-				name = b.name,
-				blockType = BlockType.valueOf(b.blockType),
-				inputCount = defaultInputCount,
-				outputCount = defaultOutputCount,
-				serializedId = b.id,
-				inputFormat = b.inputFormat ?: InputFormatType.JSON,
-				code = code,        // загруженный из файла
-				subProjectPath = b.subProjectPath ?: "",
-				inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
-				outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
-				packagesNames = b.packagesNames ?: mutableListOf(),
-			)
-			if (block.blockType == BlockType.PROPERTIES && b.codeFile != null) {
-				val propsFile = File(projectDir, b.codeFile)
-				if (propsFile.exists() && propsFile.length() > 0) {
-					try {
-						val props: Map<String, Any> = ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
-						block.outputsData = props.entries.map { (k, v) ->
-							mutableMapOf(k to v)
+				// создаём BlockNode как раньше, но передаём код и dataDocs
+				val block = BlockNode(
+					x = b.x,
+					y = b.y,
+					name = b.name,
+					blockType = BlockType.valueOf(b.blockType),
+					inputCount = defaultInputCount,
+					outputCount = defaultOutputCount,
+					serializedId = b.id,
+					inputFormat = b.inputFormat ?: InputFormatType.JSON,
+					code = code,        // загруженный из файла
+					subProjectPath = b.subProjectPath ?: "",
+					inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
+					outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
+					packagesNames = b.packagesNames ?: mutableListOf(),
+				)
+				if (block.blockType == BlockType.PROPERTIES && b.codeFile != null) {
+					val propsFile = File(projectDir, b.codeFile)
+					if (propsFile.exists() && propsFile.length() > 0) {
+						try {
+							val props: Map<String, Any> = ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
+							block.outputsData = props.entries.map { (k, v) ->
+								mutableMapOf(k to v)
+							}.toMutableList()
+						} catch (_: Exception) {
+							block.outputsData = mutableListOf()
+						}
+					} else {
+						// файл пустой — инициализируем пустыми значениями
+						block.outputsData = block.outputNames.map { name ->
+							mutableMapOf<String, Any>(name to "")
 						}.toMutableList()
-					} catch (_: Exception) {
-						block.outputsData = mutableListOf()
-					}
-				} else {
-					// файл пустой — инициализируем пустыми значениями
-					block.outputsData = block.outputNames.map { name ->
-						mutableMapOf<String, Any>(name to "")
-					}.toMutableList()
-				}
-			}
-			if (block.blockType == BlockType.SUB_PROJECT && b.codeFile != null) {
-				val propsFile = File(projectDir, b.codeFile)
-				if (propsFile.exists() && propsFile.length() > 0) {
-					val props: Map<String, Any> = ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
-					block.subProjectProps = props.toMutableMap()
-				}
-			}
-			block.onMove = { ensureBlockVisible(block) }
-			blocks.add(block)
-			idToBlock[b.id] = block
-			(scrollPane.content as? Pane)?.children?.add(block)
-			block.rebuildCirclesHandlers { outIndex, outCircle ->
-				outCircle.onMousePressed = EventHandler { event ->
-					if (event.button == MouseButton.PRIMARY) {
-						selectBlock(block)
-						(scrollPane.content as? Pane)?.requestFocus()
-						val (startX, startY) = block.outputPoint(outIndex)
-						val line = Line(startX, startY, startX, startY).apply {
-							stroke = Color.BLUE
-							strokeWidth = 2.0
-						}
-						(scrollPane.content as? Pane)?.children?.add(line)
-						draggingLine = line
-						draggingFromBlock = block
-						draggingFromOutputIndex = outIndex
-						event.consume()
 					}
 				}
-				outCircle.onMouseDragged = EventHandler { event ->
-					if (event.button == MouseButton.PRIMARY && draggingLine != null) {
-						val paneCoords = (scrollPane.content as? Pane)?.sceneToLocal(event.sceneX, event.sceneY)
-						if (paneCoords != null) {
-							draggingLine!!.endX = paneCoords.x
-							draggingLine!!.endY = paneCoords.y
-						}
-						event.consume()
+				if (block.blockType == BlockType.SUB_PROJECT && b.codeFile != null) {
+					val propsFile = File(projectDir, b.codeFile)
+					if (propsFile.exists() && propsFile.length() > 0) {
+						val props: Map<String, Any> = ObjectMapper().readValue(propsFile, Map::class.java) as Map<String, Any>
+						block.subProjectProps = props.toMutableMap()
 					}
 				}
-				outCircle.onMouseReleased = EventHandler { event ->
-					if (event.button == MouseButton.PRIMARY && draggingLine != null) {
-						val paneCoords = contentPane.sceneToLocal(event.sceneX, event.sceneY)
-						val toBlockPair = blocks.asSequence()
-							.flatMap { other ->
-								other.inputCircles.mapIndexed { inputIdx, inputCircle ->
-									Triple(
-										other, inputCircle, inputIdx
-									)
-								}
-							}.find { (other, inputCircle, _) ->
-								if (other == draggingFromBlock) return@find false
-								val p = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
-								val panePoint = contentPane.sceneToLocal(p.x, p.y)
-								if (panePoint == null || paneCoords == null) {
-									return@find false
-								}
-								val dx = panePoint.x - paneCoords.x
-								val dy = panePoint.y - paneCoords.y
-								Math.hypot(dx, dy) <= inputCircle.radius + 4
+				block.onMove = {
+					ensureBlockVisible(block)
+					markDirty()
+				}
+				blocks.add(block)
+				idToBlock[b.id] = block
+				(scrollPane.content as? Pane)?.children?.add(block)
+				block.rebuildCirclesHandlers { outIndex, outCircle ->
+					outCircle.onMousePressed = EventHandler { event ->
+						if (event.button == MouseButton.PRIMARY) {
+							selectBlock(block)
+							(scrollPane.content as? Pane)?.requestFocus()
+							val (startX, startY) = block.outputPoint(outIndex)
+							val line = Line(startX, startY, startX, startY).apply {
+								stroke = Color.BLUE
+								strokeWidth = 2.0
+								viewOrder = 1.0
 							}
-						if (toBlockPair != null && paneCoords != null) {
-							val (toBlock, _, inputIdx) = toBlockPair
-							val (startX, startY) = draggingFromBlock!!.outputPoint(draggingFromOutputIndex!!)
-							val (endX, endY) = toBlock.inputPoint(inputIdx)
-							draggingLine!!.startX = startX
-							draggingLine!!.startY = startY
-							draggingLine!!.endX = endX
-							draggingLine!!.endY = endY
-							val conn = Connection(
-								draggingFromBlock!!, toBlock, draggingLine!!, draggingFromOutputIndex!!, inputIdx
-							)
-							connections.add(conn)
-							draggingFromBlock!!.connectedLines.add(conn)
-							toBlock.connectedLines.add(conn)
-							conn.line.onMouseClicked = EventHandler { onMouseEvent ->
-								if (onMouseEvent.button == MouseButton.PRIMARY) {
-									selectConnection(conn)
-									(conn.line.parent as? Pane)?.requestFocus()
-									onMouseEvent.consume()
-								}
-							}
-							draggingLine = null
-							draggingFromOutputIndex = null
-						} else {
-							contentPane.children?.remove(draggingLine)
-							draggingLine = null
-							draggingFromOutputIndex = null
+							(scrollPane.content as? Pane)?.children?.add(line)
+							draggingLine = line
+							draggingFromBlock = block
+							draggingFromOutputIndex = outIndex
+							event.consume()
 						}
-						event.consume()
+					}
+					outCircle.onMouseDragged = EventHandler { event ->
+						if (event.button == MouseButton.PRIMARY && draggingLine != null) {
+							val paneCoords = (scrollPane.content as? Pane)?.sceneToLocal(event.sceneX, event.sceneY)
+							if (paneCoords != null) {
+								draggingLine!!.endX = paneCoords.x
+								draggingLine!!.endY = paneCoords.y
+							}
+							event.consume()
+						}
+					}
+					outCircle.onMouseReleased = EventHandler { event ->
+						if (event.button == MouseButton.PRIMARY && draggingLine != null) {
+							val paneCoords = contentPane.sceneToLocal(event.sceneX, event.sceneY)
+							val toBlockPair = blocks.asSequence()
+								.flatMap { other ->
+									other.inputCircles.mapIndexed { inputIdx, inputCircle ->
+										Triple(
+											other, inputCircle, inputIdx
+										)
+									}
+								}.find { (other, inputCircle, _) ->
+									if (other == draggingFromBlock) return@find false
+									val p = inputCircle.localToScene(inputCircle.centerX, inputCircle.centerY)
+									val panePoint = contentPane.sceneToLocal(p.x, p.y)
+									if (panePoint == null || paneCoords == null) {
+										return@find false
+									}
+									val dx = panePoint.x - paneCoords.x
+									val dy = panePoint.y - paneCoords.y
+									Math.hypot(dx, dy) <= inputCircle.radius + 4
+								}
+							if (toBlockPair != null && paneCoords != null) {
+								val (toBlock, _, inputIdx) = toBlockPair
+								val (startX, startY) = draggingFromBlock!!.outputPoint(draggingFromOutputIndex!!)
+								val (endX, endY) = toBlock.inputPoint(inputIdx)
+								draggingLine!!.startX = startX
+								draggingLine!!.startY = startY
+								draggingLine!!.endX = endX
+								draggingLine!!.endY = endY
+								val conn = Connection(
+									draggingFromBlock!!, toBlock, draggingLine!!, draggingFromOutputIndex!!, inputIdx
+								)
+								connections.add(conn)
+								draggingFromBlock!!.connectedLines.add(conn)
+								toBlock.connectedLines.add(conn)
+								markDirty()
+								conn.line.onMouseClicked = EventHandler { onMouseEvent ->
+									if (onMouseEvent.button == MouseButton.PRIMARY) {
+										selectConnection(conn)
+										(conn.line.parent as? Pane)?.requestFocus()
+										onMouseEvent.consume()
+									}
+								}
+								draggingLine = null
+								draggingFromOutputIndex = null
+							} else {
+								contentPane.children?.remove(draggingLine)
+								draggingLine = null
+								draggingFromOutputIndex = null
+							}
+							event.consume()
+						}
 					}
 				}
-			}
-			if (block.blockType == BlockType.SUB_PROJECT && block.subProjectPath.isNotBlank()) {
-				adjustProjectNodeIO(block, File(block.subProjectPath))
-			}
-		}
-
-		// Восстановление соединений
-		data.connections.forEach { c ->
-			val fromBlock = idToBlock[c.fromId] ?: return@forEach
-			val toBlock = idToBlock[c.toId] ?: return@forEach
-			val outIdx = c.fromOutputIndex
-			val inIdx = c.toInputIndex
-			val (startX, startY) = fromBlock.outputPoint(outIdx)
-			val (endX, endY) = toBlock.inputPoint(inIdx)
-			val visibleLine = Line(startX, startY, endX, endY).apply {
-				stroke = Color.BLUE
-				strokeWidth = 2.0
-			}
-			val conn = Connection(fromBlock, toBlock, visibleLine, outIdx, inIdx)
-			val pickLine = Line().apply {
-				stroke = Color.TRANSPARENT
-				strokeWidth = 12.0
-				isPickOnBounds = false
-
-				startXProperty().bind(visibleLine.startXProperty())
-				startYProperty().bind(visibleLine.startYProperty())
-				endXProperty().bind(visibleLine.endXProperty())
-				endYProperty().bind(visibleLine.endYProperty())
-
-				onMouseClicked = EventHandler { ev ->
-					if (ev.button == MouseButton.PRIMARY) {
-						selectConnection(conn)
-						(parent as? Pane)?.requestFocus()
-						ev.consume()
-					}
+				if (block.blockType == BlockType.SUB_PROJECT && block.subProjectPath.isNotBlank()) {
+					adjustProjectNodeIO(block, File(block.subProjectPath))
 				}
 			}
-			(scrollPane.content as? Pane)?.children?.addAll(pickLine, visibleLine)
-			pickLine.toFront()
-			visibleLine.toFront()
-			connections.add(conn)
-			fromBlock.connectedLines.add(conn)
-			toBlock.connectedLines.add(conn)
-			fromBlock.toFront()
-			toBlock.toFront()
+
+			// Восстановление соединений
+			data.connections.forEach { c ->
+				val fromBlock = idToBlock[c.fromId] ?: return@forEach
+				val toBlock = idToBlock[c.toId] ?: return@forEach
+				val outIdx = c.fromOutputIndex
+				val inIdx = c.toInputIndex
+				val (startX, startY) = fromBlock.outputPoint(outIdx)
+				val (endX, endY) = toBlock.inputPoint(inIdx)
+				val visibleLine = Line(startX, startY, endX, endY).apply {
+					stroke = Color.BLUE
+					strokeWidth = 2.0
+				}
+				val conn = Connection(fromBlock, toBlock, visibleLine, outIdx, inIdx)
+				val pickLine = Line().apply {
+					stroke = Color.TRANSPARENT
+					strokeWidth = 12.0
+					isPickOnBounds = false
+					viewOrder = 0.9
+
+					startXProperty().bind(visibleLine.startXProperty())
+					startYProperty().bind(visibleLine.startYProperty())
+					endXProperty().bind(visibleLine.endXProperty())
+					endYProperty().bind(visibleLine.endYProperty())
+
+					onMouseClicked = EventHandler { ev ->
+						if (ev.button == MouseButton.PRIMARY) {
+							selectConnection(conn)
+							(parent as? Pane)?.requestFocus()
+							ev.consume()
+						}
+					}
+				}
+				(scrollPane.content as? Pane)?.children?.addAll(pickLine, visibleLine)
+				pickLine.toFront()
+				visibleLine.toFront()
+				connections.add(conn)
+				fromBlock.connectedLines.add(conn)
+				toBlock.connectedLines.add(conn)
+				fromBlock.toFront()
+				toBlock.toFront()
+			}
+		} finally {
+			suppressDirty = false
+			clearDirty()
+			updateTitle()
 		}
 	}
 
@@ -666,6 +700,7 @@ class MainApp : Application() {
 		val line = Line(startX, startY, startX, startY).apply {
 			stroke = Color.BLUE
 			strokeWidth = 2.0
+			viewOrder = 1.0
 		}
 		(scrollPane.content as Pane).children.add(line)
 		draggingLine = line
@@ -766,6 +801,7 @@ class MainApp : Application() {
 					val line = Line(startX, startY, startX, startY).apply {
 						stroke = Color.BLUE
 						strokeWidth = 2.0
+						viewOrder = 1.0
 					}
 					contentPane.children?.add(line)
 					draggingLine = line
@@ -825,6 +861,7 @@ class MainApp : Application() {
 							stroke = Color.TRANSPARENT
 							strokeWidth = 12.0
 							isPickOnBounds = false
+							viewOrder = 0.9
 							startXProperty().bind(visibleLine.startXProperty())
 							startYProperty().bind(visibleLine.startYProperty())
 							endXProperty().bind(visibleLine.endXProperty())
@@ -869,6 +906,9 @@ class MainApp : Application() {
 
 
 	private fun runButtonHandler() {
+		springProcess?.destroy()
+		springProcess = null
+		startSpringBoot("./spring-app/test-spring-0.0.1-SNAPSHOT.jar")
 		// Запускаем весь оркестратор НЕ на FX-потоке, чтобы UI не подвисал,
 		// а Platform.runLater обновлял рамку "executing" в реальном времени.
 		Thread {
@@ -1185,7 +1225,6 @@ class MainApp : Application() {
 						block.outputsData.add(mutableMapOf())
 					}
 				}
-
 				// Для каждого выхода: кладём значение по имени
 				block.outputsData = block.outputNames.mapIndexed { idx, name ->
 					val existing = block.outputsData.getOrNull(idx)?.get(name)
@@ -1193,6 +1232,26 @@ class MainApp : Application() {
 					mutableMapOf(name to value)
 				}.toMutableList()
 			}
+
+			BlockType.FORM -> {
+				// генерируем путь на основе имени блока
+				val endpointPath = "/${block.name.lowercase().replace("\\s+".toRegex(), "_")}"
+
+				// если код начинается с "<", считаем что это HTML-страница
+				if (block.code.trim().startsWith("<")) {
+					// HTML
+					createDynamicThymeleafEndpoint(endpointPath, block)
+				} else {
+					// JSON или текст
+					val response: Map<String, Any> = try {
+						ObjectMapper().readValue(block.code, Map::class.java) as Map<String, Any>
+					} catch (_: Exception) {
+						mapOf("result" to block.code)
+					}
+					createDynamicRestEndpoint(endpointPath, response)
+				}
+			}
+
 		}
 	}
 
@@ -1599,6 +1658,8 @@ class MainApp : Application() {
 
 				BlockType.EXIT -> { /* не исполняем явно */
 				}
+
+				BlockType.FORM -> {}
 			}
 		}
 
@@ -1674,24 +1735,174 @@ class MainApp : Application() {
 
 	private fun adjustProjectNodeIO(node: BlockNode, file: File) {
 		val data: BlocksData = ObjectMapper().readValue(file, BlocksData::class.java)
-		val newInputs = data.blocks.count { it.blockType == "START" }
-		val newOutputs = data.blocks.count { it.blockType == "EXIT" }
-		node.updatePorts(newInputs/*.coerceAtLeast(1)*/, newOutputs/*.coerceAtLeast(1)*/)
 
-		val inputBlocks = data.blocks.filter { it.blockType == "START" }
+		// входами считаем START + INPUT_DATA без кода
+		val inputBlocks = data.blocks.filter {
+			it.blockType == "START" || (it.blockType == "INPUT_DATA" && it.codeFile.isNullOrBlank())
+		}
 		val outputBlocks = data.blocks.filter { it.blockType == "EXIT" }
-		node.inputNames = inputBlocks.map { it.name }.toMutableList()
-		node.outputNames = outputBlocks.map { it.name }.toMutableList()
+
+		val newInputs = inputBlocks.size.coerceAtLeast(1)
+		val newOutputs = outputBlocks.size.coerceAtLeast(1)
+
+		node.updatePorts(newInputs, newOutputs)
+
+		node.inputNames = inputBlocks.map { it.name.ifBlank { "in" } }.toMutableList()
+		node.outputNames = outputBlocks.map { it.name.ifBlank { "out" } }.toMutableList()
+
 		node.inputCount = node.inputNames.size
 		node.outputCount = node.outputNames.size
 
 		node.recreateIOCircles()
+		markDirty()
+	}
+
+
+	private fun updateTitle() {
+		if (!this::stage.isInitialized) {
+			return
+		}
+		val base = currentProjectFile?.name ?: "Low code processes executor"
+		stage.title = if (isDirty) "• $base" else base
+	}
+
+	private fun markDirty() {
+		if (!suppressDirty && !isDirty) {
+			isDirty = true
+			updateTitle()
+		}
+	}
+
+	private fun clearDirty() {
+		if (isDirty) {
+			isDirty = false
+			updateTitle()
+		}
+	}
+
+	/** Показывает диалог «Сохранить изменения?» если есть несохранённые правки.
+	 *  Возвращает true — продолжать операцию; false — отменить. */
+	private fun confirmSaveIfDirty(): Boolean {
+		if (!isDirty) return true
+		val save = ButtonType("Сохранить", ButtonBar.ButtonData.YES)
+		val dont = ButtonType("Не сохранять", ButtonBar.ButtonData.NO)
+		val cancel = ButtonType.CANCEL
+
+		val alert = Alert(Alert.AlertType.CONFIRMATION).apply {
+			title = "Проект изменён"
+			headerText = "Сохранить изменения?"
+			contentText = currentProjectFile?.name ?: "Новый проект"
+			buttonTypes.setAll(save, dont, cancel)
+		}
+		when (alert.showAndWait().orElse(cancel)) {
+			save -> {
+				if (currentProjectFile != null) {
+					exportBlocksToFile(currentProjectFile!!)
+				} else {
+					val fc = FileChooser().apply {
+						title = "Сохранить проект"
+						extensionFilters.add(FileChooser.ExtensionFilter("JSON Files", "*.json"))
+					}
+					val f = fc.showSaveDialog(stage) ?: return false
+					exportBlocksToFile(f)
+					currentProjectFile = f
+				}
+				clearDirty()
+				return true
+			}
+
+			dont -> return true
+			else -> return false
+		}
+	}
+
+
+	private fun startSpringBoot(jarPath: String, port: Int = 8080) {
+		if (springProcess != null && springProcess!!.isAlive) {
+			println("Spring Boot уже запущен на порту $port")
+			return
+		}
+
+		val process = ProcessBuilder(
+			"java",
+			"-jar", jarPath,
+			"--server.port=$port"
+		)
+			.redirectErrorStream(true)
+			.start()
+
+		springProcess = process
+
+		// читаем логи в отдельном потоке
+		Thread {
+			process.inputStream.bufferedReader().forEachLine { line ->
+				springLogs.appendText("${line}\n")
+			}
+		}.start()
+	}
+
+
+	private fun createDynamicRestEndpoint(path: String, response: Map<String, Any>) {
+		val endpointsDir = File("./spring-app/endpoints")
+		if (!endpointsDir.exists()) endpointsDir.mkdirs()
+
+		val file = File(endpointsDir, "${path.trimStart('/')}.json")
+		val json = ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(
+			mapOf(
+				"path" to path,
+				"response" to response
+			)
+		)
+		file.writeText(json)
+		println("Создан REST эндпоинт $path -> ${file.absolutePath}")
+	}
+
+
+	private fun createDynamicThymeleafEndpoint(path: String, block: BlockNode) {
+		val endpointsDir = File("./spring-app/endpoints")
+		if (!endpointsDir.exists()) {
+			endpointsDir.mkdirs()
+		}
+		val inputs = HashMap<String, Any>()
+		block.connectedLines
+			.filter { it.to == block }
+			.sortedBy { it.toPort }
+			.forEach { c ->
+				inputs[block.inputNames[c.toPort]] = c.from.outputsData[c.fromPort]
+			}
+		val merged = inputs.values
+			.filterIsInstance<Map<String, Any>>()
+			.flatMap { it.entries }
+			.associate { it.key to it.value }
+		val file = File(endpointsDir, "${path.trimStart('/')}.json")
+		val json = ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(
+			mapOf(
+				"path" to path,
+				"type" to "inline-view",
+				"template" to block.code,
+				"model" to merged,
+			)
+		)
+		file.writeText(json)
+		println("Создан thymeleaf-эндпоинт $path")
+	}
+
+
+	override fun stop() {
+		super.stop()
+		stopSpringBoot()
+	}
+
+	private fun stopSpringBoot() {
+		springProcess?.destroy()
+		springProcess = null
 	}
 
 
 	companion object {
 		private const val PYTHON_PARAMS_VARIABLE = "PARAMS_JSON"
 		private val PYTHON = getPython()
+		private val springLogs: File = File("./spring-app/output.log")
 
 
 		private fun getPython(): String {

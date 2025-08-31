@@ -12,4 +12,5 @@ enum class BlockType(val displayName: String, val color: Color) {
 	EXIT("Exit", Color.LIGHTSALMON),
 	SUB_PROJECT("Проект", Color.GOLD),
 	PROPERTIES("Свойства", Color.TAN),
+	FORM("Форма", Color.LIGHTSKYBLUE),
 }
