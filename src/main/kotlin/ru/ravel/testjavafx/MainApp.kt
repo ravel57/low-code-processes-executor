@@ -28,10 +28,7 @@ import org.graalvm.polyglot.Context
 import org.graalvm.polyglot.Value
 import org.graalvm.polyglot.proxy.ProxyObject
 import org.yaml.snakeyaml.Yaml
-import ru.ravel.testjavafx.model.BlockSerialized
-import ru.ravel.testjavafx.model.BlockType
-import ru.ravel.testjavafx.model.BlocksData
-import ru.ravel.testjavafx.model.InputFormatType
+import ru.ravel.testjavafx.model.*
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -62,7 +59,7 @@ class MainApp : Application() {
 	private val windowH = 600.0
 	private val gridCanvas = Canvas(windowW, windowH)
 	private val workspaceGroup = Group()
-	private val contentPane = Pane().apply {
+	val contentPane = Pane().apply {
 		children.setAll(gridCanvas, workspaceGroup)
 		prefWidth = windowW * 2
 		prefHeight = windowH * 2
@@ -82,6 +79,10 @@ class MainApp : Application() {
 	private var isDirty = false
 	private var suppressDirty = false
 	private var springProcess: Process? = null
+	private val undoStack: Deque<Command> = ArrayDeque()
+	private val redoStack: Deque<Command> = ArrayDeque()
+	private var lastPressX: Double = 0.0
+	private var lastPressY: Double = 0.0
 
 
 	override fun start(primaryStage: Stage) {
@@ -152,12 +153,13 @@ class MainApp : Application() {
 							}
 							val file = fc.showOpenDialog(primaryStage)
 							if (file != null) {
-								val node = addBlock(contentPane, event.x, event.y, file.nameWithoutExtension, type)
-								node.subProjectPath = file.absolutePath
-								adjustProjectNodeIO(node, file)
+								runCommand(AddBlockCommand(this, contentPane, event.x, event.y, file.nameWithoutExtension, type))
+								val node = (undoStack.peek() as? AddBlockCommand)?.block
+								node?.subProjectPath = file.absolutePath
+								node?.let { adjustProjectNodeIO(it, file) }
 							}
 						} else {
-							addBlock(contentPane, event.x, event.y, type.displayName, type)
+							runCommand(AddBlockCommand(this, contentPane, event.x, event.y, type.displayName, type))
 						}
 					}
 					contextMenu.items.add(item)
@@ -241,9 +243,7 @@ class MainApp : Application() {
 		val scene = Scene(root, windowW, windowH).apply {
 			setOnKeyPressed { event ->
 				if (event.code in arrayOf(KeyCode.DELETE, KeyCode.BACK_SPACE)) {
-					selectedBlock?.let { block ->
-						deleteBlockRequest(block)    //FIXME
-					}
+					selectedBlock?.let { runCommand(DeleteBlockCommand(this@MainApp, it)) }
 					selectedConnection?.let { conn ->
 						connections.remove(conn)
 						conn.from.connectedLines.remove(conn)
@@ -268,6 +268,33 @@ class MainApp : Application() {
 						}
 					}
 					event.consume()
+				}
+				// Ctrl+Z
+				if (event.isControlDown && !event.isShiftDown && event.code == KeyCode.Z) {
+					if (undoStack.isNotEmpty()) {
+						val cmd = undoStack.pop()
+						cmd.undo()
+						redoStack.push(cmd)
+					}
+					event.consume()
+				}
+				// Ctrl+Shift+z
+				if (event.isControlDown && event.isShiftDown && event.code == KeyCode.Z) {
+					if (redoStack.isNotEmpty()) {
+						val cmd = redoStack.pop()
+						cmd.execute()
+						undoStack.push(cmd)
+					}
+					event.consume()
+				}
+			}
+			// фильтр на клик мышью — скрыть контекстное меню
+			addEventFilter(MouseEvent.MOUSE_PRESSED) { _ ->
+				activeContextMenu?.let { menu ->
+					if (menu.isShowing) {
+						menu.hide()
+						activeContextMenu = null
+					}
 				}
 			}
 		}
@@ -325,7 +352,7 @@ class MainApp : Application() {
 		selectedBlock = null
 	}
 
-	private fun addBlock(parent: Pane, x: Double, y: Double, name: String, blockType: BlockType): BlockNode {
+	fun addBlock(parent: Pane, x: Double, y: Double, name: String, blockType: BlockType): BlockNode {
 		val block = BlockNode(x, y, name, blockType)
 		blocks.add(block)
 		block.onMove = { ensureBlockVisible(block) }
@@ -795,6 +822,7 @@ class MainApp : Application() {
 		block.outputCircles.forEachIndexed { outputIdx, outCircle ->
 			outCircle.onMousePressed = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY) {
+					setPressCoords(block, block.layoutX, block.layoutY)
 					selectBlock(block)
 					contentPane.requestFocus()
 					val (startX, startY) = block.outputPoint(outputIdx)
@@ -1885,6 +1913,26 @@ class MainApp : Application() {
 		)
 		file.writeText(json)
 		println("Создан thymeleaf-эндпоинт $path")
+	}
+
+
+	fun runCommand(cmd: Command) {
+		cmd.execute()
+		undoStack.push(cmd)
+		redoStack.clear() // сбрасываем redo после нового действия
+	}
+
+
+	fun onBlockReleased(block: BlockNode) {
+		if (lastPressX != block.layoutX || lastPressY != block.layoutY) {
+			runCommand(MoveBlockCommand(block, lastPressX, lastPressY, block.layoutX, block.layoutY))
+		}
+	}
+
+
+	fun setPressCoords(block: BlockNode, x: Double, y: Double) {
+		lastPressX = x
+		lastPressY = y
 	}
 
 

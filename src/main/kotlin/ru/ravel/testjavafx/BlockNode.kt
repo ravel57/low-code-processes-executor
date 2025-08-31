@@ -28,6 +28,7 @@ import org.fxmisc.richtext.LineNumberFactory
 import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.BlockType
+import ru.ravel.testjavafx.model.DeleteBlockCommand
 import ru.ravel.testjavafx.model.InputFormatType
 import ru.ravel.testjavafx.model.MapAction
 import java.io.File
@@ -108,7 +109,7 @@ class BlockNode(
 			if (event.button == MouseButton.PRIMARY) {
 				snapToGrid()
 				updateConnectedLines()
-				event.consume()
+//				event.consume()
 			}
 		}
 		label.onMouseReleased = rect.onMouseReleased
@@ -126,6 +127,26 @@ class BlockNode(
 					showCodeEditor()
 					event.consume()
 				}
+			}
+		}
+
+		this.onMousePressed = EventHandler { event ->
+			if (event.button == MouseButton.PRIMARY) {
+				onBlockPressed(event)
+			}
+		}
+		this.onMouseDragged = EventHandler { event ->
+			if (event.button == MouseButton.PRIMARY) {
+				onBlockDragged(event)
+			}
+		}
+		this.onMouseReleased = EventHandler { event ->
+			if (event.button == MouseButton.PRIMARY) {
+				snapToGrid()
+				updateConnectedLines()
+				// Здесь можно дергать MainApp для записи MoveBlockCommand
+				val app = scene?.window?.userData as? MainApp
+				app?.onBlockReleased(this)
 			}
 		}
 
@@ -151,7 +172,7 @@ class BlockNode(
 
 				val deleteItem = MenuItem("Удалить")
 				deleteItem.setOnAction {
-					(scene?.window?.userData as? MainApp)?.deleteBlockRequest(this)
+					(scene?.window?.userData as? MainApp)?.runCommand(DeleteBlockCommand(scene?.window?.userData as MainApp, this))
 				}
 
 				val prevBlocksItem = MenuItem("Предыдущие связанные блоки")
@@ -187,6 +208,7 @@ class BlockNode(
 			dragOffsetX = mouseInPane.x - layoutX
 			dragOffsetY = mouseInPane.y - layoutY
 			event.consume()
+			(scene?.window?.userData as? MainApp)?.setPressCoords(this, layoutX, layoutY)
 		}
 	}
 
@@ -648,6 +670,7 @@ class BlockNode(
 				}
 				inputCircles.add(circle)
 				children.add(circle)
+				circle.isMouseTransparent = true
 			}
 		}
 		// Выходы
@@ -766,7 +789,15 @@ class BlockNode(
 	}
 
 	fun updateConnectedLines() {
-		connectedLines.forEach { it.updateLine() }
+		connectedLines.forEach { conn ->
+			conn.updateLine()
+			val (sx, sy) = conn.from.outputPoint(conn.fromPort)
+			val (ex, ey) = conn.to.inputPoint(conn.toPort)
+			conn.line.startX = sx
+			conn.line.startY = sy
+			conn.line.endX = ex
+			conn.line.endY = ey
+		}
 	}
 
 	fun rebuildCirclesHandlers(handler: (outIndex: Int, outCircle: Circle) -> Unit) {
