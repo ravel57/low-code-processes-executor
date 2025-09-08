@@ -356,9 +356,8 @@ class BlockNode(
 
 			val codeTab = Tab("Код", VBox(codeScroll)).apply { isClosable = false }
 			val docsTab = Tab("DataDocs", VBox(10.0, buildKeysPane())).apply { isClosable = false }
-			val tabPane = if (blockType != BlockType.SUB_PROJECT) {
-				TabPane(codeTab, docsTab, configTab)
-			} else {
+
+			val tabPane = if (blockType == BlockType.SUB_PROJECT) {
 				val tabs = mutableListOf<Tab>()
 				tabs += docsTab
 
@@ -409,8 +408,25 @@ class BlockNode(
 						tabs.add(propsTab)
 					}
 				}
-
 				TabPane(*tabs.toTypedArray())
+			} else {
+				val endpointTab = if (blockType == BlockType.FORM) {
+					val tf = TextField(endpoint).apply {
+						promptText = "/my_form_endpoint"
+						textProperty().addListener { _, _, newValue ->
+							endpoint = newValue
+						}
+					}
+					val box = VBox(10.0, Label("Endpoint:"), tf).apply { padding = Insets(10.0) }
+					Tab("Endpoint", box).apply { isClosable = false }
+				} else {
+					null
+				}
+				if (endpointTab != null) {
+					TabPane(codeTab, docsTab, configTab, endpointTab)
+				} else {
+					TabPane(codeTab, docsTab, configTab)
+				}
 			}
 			VBox.setVgrow(tabPane, Priority.ALWAYS)
 

@@ -31,8 +31,10 @@ import org.yaml.snakeyaml.Yaml
 import ru.ravel.testjavafx.model.*
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.nio.file.StandardWatchEventKinds
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -71,7 +73,6 @@ class MainApp : Application() {
 		hbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
 		vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
 	}
-	private var lastEnsureVisible = 0L
 	private val executor = Executors.newFixedThreadPool(
 		Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
 	)
@@ -85,6 +86,10 @@ class MainApp : Application() {
 	private var lastPressY: Double = 0.0
 	private var worldOffsetX = 0.0
 	private var worldOffsetY = 0.0
+	private val waitingForms = mutableSetOf<BlockNode>()
+	private val createdFormEndpoints = mutableSetOf<String>()
+	private val handledEndpointsTs = mutableMapOf<String, Long>()
+
 
 	override fun start(primaryStage: Stage) {
 		stage = primaryStage
@@ -322,6 +327,33 @@ class MainApp : Application() {
 		primaryStage.show()
 		setupContextMenu()
 		contentPane.requestFocus()
+
+		startFileWatcher()
+		if (inputData.isNotEmpty()) {
+			for ((index, s) in inputData.withIndex())
+				when (s) {
+					"-f" -> {
+						val file = File(inputData[index + 1])
+						importBlocksFromFile(file)
+						importOutputsData(file)
+						currentProjectFile = file
+						clearDirty()
+						updateTitle()
+					}
+
+					"-d" -> {
+						val file = File(inputData[index + 1])
+						val objectMapper = ObjectMapper()
+						val data = objectMapper.readValue(file, Map::class.java) as Map<String, Any>
+						blocks.filter { it.blockType == BlockType.START }.forEach { startBlock ->
+							if (data.containsKey(startBlock.name)) {
+								val values = data[startBlock.name] as? Map<String, Any> ?: emptyMap()
+								startBlock.outputsData = mutableListOf(values.toMutableMap())
+							}
+						}
+					}
+				}
+		}
 	}
 
 	fun selectBlock(block: BlockNode?) {
@@ -452,6 +484,7 @@ class MainApp : Application() {
 				inputNames = block.inputNames.toList(),
 				outputNames = block.outputNames.toList(),
 				packagesNames = block.packagesNames,
+				endpoint = block.endpoint,
 			)
 		}
 
@@ -514,6 +547,7 @@ class MainApp : Application() {
 					inputNames = b.inputNames?.toMutableList() ?: mutableListOf(),
 					outputNames = b.outputNames?.toMutableList() ?: mutableListOf(),
 					packagesNames = b.packagesNames ?: mutableListOf(),
+					endpoint = b.endpoint ?: "",
 				)
 				if (block.blockType == BlockType.PROPERTIES && b.codeFile != null) {
 					val propsFile = File(projectDir, b.codeFile)
@@ -687,7 +721,9 @@ class MainApp : Application() {
 		val projectDir = projectFile.parentFile ?: File(".")
 		val outputsDir = File(projectDir, "${projectFile.nameWithoutExtension}_outputs_data")
 		outputsDir.mkdirs()
-		val outputsMap = blocks.associate { it.serializedId.toString() to it.outputsData }
+		val outputsMap = blocks.associate { block ->
+			block.serializedId.toString() to block.outputsData
+		}
 		val timestamp = DateTimeFormatter
 			.ofPattern("yyyyMMddHHmmss")
 			.withZone(ZoneId.systemDefault())
@@ -1080,7 +1116,7 @@ class MainApp : Application() {
 
 
 	private fun runBlock(block: BlockNode) {
-		if (block.blockType !in arrayOf(BlockType.SUB_PROJECT, BlockType.PROPERTIES)) {
+		if (block.blockType !in arrayOf(BlockType.SUB_PROJECT, BlockType.PROPERTIES, BlockType.START, BlockType.FORM)) {
 			block.outputsData = mutableListOf()
 		}
 		when (block.blockType) {
@@ -1205,12 +1241,15 @@ class MainApp : Application() {
 			}
 
 			BlockType.START -> {
-				val map = mutableMapOf<String, Any>()
-				if (block.code.isNotBlank()) {
-					map["trigger"] = block.code.trim()
+				if (block.outputsData.isEmpty()) {
+					val map = mutableMapOf<String, Any>()
+					if (block.code.isNotBlank()) {
+						map["trigger"] = block.code.trim()
+					}
+					block.outputsData = mutableListOf(map)
 				}
-				block.outputsData = mutableListOf(map)
 			}
+
 
 			BlockType.EXIT -> {}
 
@@ -1264,12 +1303,29 @@ class MainApp : Application() {
 
 			BlockType.FORM -> {
 				// генерируем путь на основе имени блока
-				val endpointPath = "/${block.name.lowercase().replace("\\s+".toRegex(), "_")}"
+				val endpointPath = if (block.endpoint.startsWith("/")) {
+					block.endpoint
+				} else {
+					"/${block.endpoint}"
+				}
 
 				// если код начинается с "<", считаем что это HTML-страница
 				if (block.code.trim().startsWith("<")) {
-					// HTML
-					createDynamicThymeleafEndpoint(endpointPath, block)
+					// GET — отдать страницу
+					if (!createdFormEndpoints.contains(endpointPath)) {
+						createDynamicThymeleafEndpoint(endpointPath, block)
+						createdFormEndpoints.add(endpointPath)
+						println("Создан thymeleaf-эндпоинт $endpointPath")
+					}
+
+					if (block.outputsData.isEmpty()) {
+						println("⏸ Форма $endpointPath ждёт ввода...")
+						waitingForms.add(block)
+						return
+					}
+
+					println("▶️ Данные формы $endpointPath получены: ${block.outputsData}")
+					waitingForms.remove(block)
 				} else {
 					// JSON или текст
 					val response: Map<String, Any> = try {
@@ -1313,7 +1369,7 @@ class MainApp : Application() {
 		}
 
 		// --- 3) Реально расширяем скроллируемую область под ВЕСЬ диапазон (и слева/сверху, и справа/снизу)
-		val widthNeeded  = (maxX - minX) + 2 * margin
+		val widthNeeded = (maxX - minX) + 2 * margin
 		val heightNeeded = (maxY - minY) + 2 * margin
 
 		// Правый край: если тащим вправо — maxX растёт, widthNeeded растёт → расширяем prefWidth
@@ -1447,7 +1503,7 @@ class MainApp : Application() {
 	private fun String.runPythonScript(
 		block: BlockNode,
 		bindings: Map<String, Any?> = emptyMap(),
-		outputs: MutableMap<String, MutableMap<String, Any>>
+		outputs: MutableMap<String, MutableMap<String, Any>>,
 	): Map<String, Any?> {
 		val tmp = "run/python/${block.serializedId}_${block.hashCode()}"
 		val venvDirPath = Paths.get("").toAbsolutePath().resolve(tmp).apply { Files.createDirectories(this) }
@@ -1663,7 +1719,8 @@ class MainApp : Application() {
 				BlockType.MAPPING_PYTHON,
 				BlockType.CONNECTOR,
 				BlockType.INPUT_DATA,
-				BlockType.START -> runBlock(b)
+				BlockType.START,
+				-> runBlock(b)
 
 				BlockType.SUB_PROJECT -> {
 					val f = File(b.subProjectPath)
@@ -1676,11 +1733,9 @@ class MainApp : Application() {
 					}
 				}
 
-				BlockType.PROPERTIES -> { /* уже загружены/проброшены */
-				}
+				BlockType.PROPERTIES -> {}/* уже загружены/проброшены */
 
-				BlockType.EXIT -> { /* не исполняем явно */
-				}
+				BlockType.EXIT -> {} /* не исполняем явно */
 
 				BlockType.FORM -> {}
 			}
@@ -1911,6 +1966,107 @@ class MainApp : Application() {
 	}
 
 
+	private fun loadFormInput(file: File): MutableMap<String, Any> {
+		return if (file.exists()) {
+			val map = ObjectMapper().readValue(file, Map::class.java) as Map<String, Any>
+			map.toMutableMap()
+		} else {
+			mutableMapOf()
+		}
+	}
+
+
+	fun startFileWatcher() {
+		val dir = Paths.get("./spring-app/data")
+		if (!Files.exists(dir)) Files.createDirectories(dir)
+
+		val watchService = FileSystems.getDefault().newWatchService()
+		dir.register(
+			watchService,
+			StandardWatchEventKinds.ENTRY_CREATE,
+			StandardWatchEventKinds.ENTRY_MODIFY
+		)
+		Thread {
+			while (true) {
+				val key = watchService.take()
+				for (event in key.pollEvents()) {
+					val fileName = event.context().toString()
+					println("👀 Изменился файл: $fileName")
+					if (fileName.endsWith(".json")) {
+						val endpoint = fileName.removeSuffix(".json")
+						val file = dir.resolve(fileName).toFile()
+						if (!file.exists()) continue
+
+						// Дебаунс: игнорируем повторы <150мс по тому же эндпоинту
+						val now = System.currentTimeMillis()
+						val last = handledEndpointsTs[endpoint] ?: 0L
+						if (now - last < 150) {
+							continue
+						}
+
+						try {
+							var data: Map<String, Any>? = null
+							repeat(3) {
+								if (file.length() > 0) {
+									data = ObjectMapper().readValue(file, Map::class.java) as Map<String, Any>
+									return@repeat
+								}
+								Thread.sleep(100)
+							}
+							if (data == null) {
+								println("⚠️ Не удалось прочитать ${file.name}, файл пустой")
+								continue
+							}
+
+							val formBlock = waitingForms.find {
+								it.blockType == BlockType.FORM &&
+										it.endpoint.removePrefix("/") == endpoint
+							}
+							if (formBlock != null) {
+								println("✅ Данные получены для формы /$endpoint: $data")
+								// Важно: заменить ссылку целиком, чтобы дети увидели новые данные
+								formBlock.outputsData = mutableListOf(data!!.toMutableMap())
+								waitingForms.remove(formBlock)
+
+								handledEndpointsTs[endpoint] = now
+
+								// Запускаем продолжение процесса на FX-потоке
+								Platform.runLater {
+									runFrom(formBlock)
+								}
+
+								// Удаляем файл, чтобы следующий submit обрабатывался с нуля
+								if (file.delete()) {
+									println("🗑 Файл ${file.name} удалён после обработки")
+								} else {
+									println("⚠️ Не удалось удалить файл ${file.name}")
+								}
+							}
+						} catch (e: Exception) {
+							e.printStackTrace()
+						}
+					}
+				}
+				key.reset()
+			}
+		}.start()
+	}
+
+	private fun runFrom(block: BlockNode) {
+		fun dfs(b: BlockNode) {
+			runBlock(b)
+			val children = connections.filter { it.from == b }.map { it.to }
+			children.forEach { dfs(it) }
+			// После того как потомки прочитали выходы формы — очищаем её,
+			// чтобы следующий submit не смешивался со старыми.
+			if (b.blockType == BlockType.FORM) {
+				b.outputsData = mutableListOf()
+			}
+		}
+		dfs(block)
+	}
+
+
 	fun runCommand(cmd: Command) {
 		cmd.execute()
 		undoStack.push(cmd)
@@ -1965,9 +2121,14 @@ class MainApp : Application() {
 			throw RuntimeException("Python не найден")
 		}
 
+		private val inputData: MutableList<String> = mutableListOf()
+
 
 		@JvmStatic
 		fun main(args: Array<String>) {
+			if (args.isNotEmpty()) {
+				inputData.addAll(args)
+			}
 			launch(MainApp::class.java)
 		}
 	}
