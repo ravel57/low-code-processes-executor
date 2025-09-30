@@ -1,1 +1,8 @@
+plugins {
+	id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
 rootProject.name = "low-code-processes-executor"
+
+include(":core", ":desktop")
+project(":core").projectDir = file("core")
+project(":desktop").projectDir = file("desktop")

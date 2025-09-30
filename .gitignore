@@ -43,3 +43,5 @@ bin/
 /.idea/
 /spring-app/
 /run/
+/scripts/
+/libs/

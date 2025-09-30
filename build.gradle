@@ -1,106 +1,13 @@
 plugins {
-	id 'java'
-	id 'application'
-	id 'org.jetbrains.kotlin.jvm' version '1.9.23'
-	id 'org.openjfx.javafxplugin' version '0.0.13'
-	id 'org.javamodularity.moduleplugin' version '1.8.12'
-	id 'com.github.johnrengelman.shadow' version '8.1.1'
+	id 'org.jetbrains.kotlin.jvm' version '1.9.23' apply false
+	id 'org.openjfx.javafxplugin' version '0.0.13' apply false
+}
+
+allprojects {
+	repositories {
+		mavenCentral()
+	}
 }
 
 group = 'ru.ravel'
-version = '1.0'
-
-repositories {
-	mavenCentral()
-}
-
-javafx {
-	version = '21.0.2'
-	modules = ['javafx.controls', 'javafx.fxml']
-}
-
-dependencies {
-	implementation 'org.openjfx:javafx-controls:21.0.2'
-	implementation 'org.openjfx:javafx-fxml:21.0.2'
-	implementation 'org.openjfx:javafx-web:21.0.2'
-	implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.23'
-	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2'
-	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2'
-
-	implementation 'org.apache.groovy:groovy:4.0.26'
-	implementation 'org.apache.groovy:groovy-jsr223:4.0.26'
-	implementation 'org.apache.groovy:groovy-json:4.0.23'
-	implementation 'org.apache.groovy:groovy-xml:4.0.23'
-	implementation 'org.apache.groovy:groovy-sql:4.0.23'
-	implementation 'org.postgresql:postgresql:42.7.7'
-	implementation "org.graalvm.js:js:24.2.1"
-	runtimeOnly 'org.graalvm.js:js-scriptengine:24.2.1'
-	implementation 'org.graalvm.polyglot:polyglot:24.2.1'
-	implementation 'org.graalvm.polyglot:js:24.2.1'
-
-	implementation 'org.openjdk.nashorn:nashorn-core:15.4'
-	implementation 'com.fasterxml.jackson.core:jackson-databind:2.19.0'
-	implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3'
-	implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-debug:1.7.3'
-	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-javafx:1.7.3"
-	implementation 'org.yaml:snakeyaml:2.2'
-	implementation 'org.fxmisc.richtext:richtextfx:0.10.9'
-}
-
-application {
-	mainClass = 'ru.ravel.testjavafx.HelloApplicationKt'
-}
-
-java {
-	sourceCompatibility = JavaVersion.VERSION_21
-	targetCompatibility = JavaVersion.VERSION_21
-	modularity.inferModulePath = true
-}
-
-tasks.named('compileKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
-	kotlinOptions.jvmTarget = '21'
-	destinationDirectory.set(
-			tasks.named('compileJava', JavaCompile).get().destinationDirectory
-	)
-}
-
-tasks.named('compileTestKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
-	kotlinOptions.jvmTarget = '21'
-	destinationDirectory.set(
-			tasks.named('compileTestJava', JavaCompile).get().destinationDirectory
-	)
-}
-
-jar {
-	enabled = false
-	from {
-		configurations.runtimeClasspath
-				.filter { it.name.endsWith(".jar") }
-				.collect { zipTree(it) }
-	}
-	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-	manifest { attributes "Main-Class": "ru.ravel.testjavafx.MainApp" }
-}
-
-tasks.named('shadowJar') {
-	archiveClassifier.set('')
-	mergeServiceFiles()
-	manifest { attributes 'Main-Class': 'ru.ravel.testjavafx.MainApp' }
-}
-
-application {
-	mainClass = 'ru.ravel.testjavafx.MainApp'
-}
-
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-	kotlinOptions {
-		jvmTarget = "21"
-	}
-}
-
-applicationDefaultJvmArgs = [
-		"--add-opens=kotlinx.coroutines.core/kotlinx.coroutines.debug.internal=ALL-UNNAMED",
-		"--add-modules", "javafx.controls,javafx.web",
-		"-Dkotlinx.coroutines.debug=on",
-		"-Dpolyglot.engine.WarnInterpreterOnly=false",
-]
+version = '0.2.0'
