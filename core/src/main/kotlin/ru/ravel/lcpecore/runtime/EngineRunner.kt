@@ -37,20 +37,18 @@ class EngineRunner(
 
 	/** Запуск всего проекта (DAG + возможные циклы — «мягкая» схема с фазами) */
 	fun run(project: CoreProject) {
-		// 1) Выполнить всё, что можно без учёта цикла
 		runPhase(project, exclude = emptySet())
-
-		// 2) Если есть цикл — итеративно прокручиваем, пока есть прогресс
 		val cycle = CycleDetector.findFirstCycle(project)
 		if (!cycle.isNullOrEmpty()) {
-			val cycleSet = cycle.toSet()
 			while (true) {
 				var progressed = false
 				for (b in cycle) {
+					val oldOutputs = b.outputsData.map { it.toMap().toMutableMap() } // снимок
 					listeners.forEach { it.onStart(b) }
 					try {
 						runBlock(b, project)
-						progressed = true
+						val changed = DataUtils.outputsChanged(oldOutputs, b.outputsData)
+						if (changed) progressed = true
 						listeners.forEach { it.onOutput(b, mapOf("outputs" to b.outputsData)) }
 					} catch (t: Throwable) {
 						listeners.forEach { it.onError(b, t) }
@@ -59,12 +57,10 @@ class EngineRunner(
 						listeners.forEach { it.onFinish(b) }
 					}
 				}
-				if (!progressed) break
-				// Упрощённый критерий стабилизации: если все входы EXIt-потомков пустые/одинаковые — выходим.
-				// При необходимости замените на ваш строгий критерий.
-				if (!CycleDetector.hasProgress(project, cycleSet)) break
+				if (!progressed) {
+					break
+				}
 			}
-			// После цикла ещё раз догоняем «детей» цикла
 			runPhase(project, exclude = emptySet())
 		}
 	}
@@ -81,27 +77,22 @@ class EngineRunner(
 				outgoing.computeIfAbsent(from) { mutableListOf() }.add(to)
 			}
 		}
-
-		// Кандидаты текущей фазы (не исключены, напр. узлы цикла)
 		val candidates = project.blocks.filter { it !in exclude }.toSet()
 		if (candidates.isEmpty()) {
 			return
 		}
-
-		// Сколько родителей ещё НЕ дало данных для каждого кандидата
 		val deps = ConcurrentHashMap<CoreBlock, AtomicInteger>()
 		candidates.forEach { b ->
 			val need = incoming[b].orEmpty().count { parent ->
-				parent in candidates && !DataUtils.hasNonEmptyOutput(parent)
+				parent in candidates && !(parent.type == BlockType.START || DataUtils.hasNonEmptyOutput(parent))
 			}
 			deps[b] = AtomicInteger(need)
 		}
-
-		// Очередь готовых к запуску
 		val ready = ConcurrentLinkedQueue<CoreBlock>()
 		candidates.forEach { if (deps[it]!!.get() == 0) ready.add(it) }
-		if (ready.isEmpty()) return
-
+		if (ready.isEmpty()) {
+			return
+		}
 		val inFlight = AtomicInteger(0)
 		val done = CompletableDeferred<Unit>()
 
@@ -131,10 +122,11 @@ class EngineRunner(
 			}
 		}
 
-		// стартовые задачи
-		while (true) ready.poll()?.let(::submit) ?: break
+		while (true) {
+			ready.poll()?.let(::submit)
+				?: break
+		}
 
-		// координатор
 		scope.launch {
 			while (isActive && (inFlight.get() > 0 || ready.isNotEmpty())) {
 				var scheduled = false
@@ -145,8 +137,6 @@ class EngineRunner(
 				if (!scheduled && inFlight.get() > 0) delay(5)
 			}
 		}
-
-		// ждём завершения всей фазы
 		runBlocking { done.await() }
 	}
 
