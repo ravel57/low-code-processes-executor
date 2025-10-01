@@ -83,9 +83,7 @@ class EngineRunner(
 		}
 		val deps = ConcurrentHashMap<CoreBlock, AtomicInteger>()
 		candidates.forEach { b ->
-			val need = incoming[b].orEmpty().count { parent ->
-				parent in candidates && !(parent.type == BlockType.START || DataUtils.hasNonEmptyOutput(parent))
-			}
+			val need = incoming[b].orEmpty().count { parent -> parent in candidates }
 			deps[b] = AtomicInteger(need)
 		}
 		val ready = ConcurrentLinkedQueue<CoreBlock>()
@@ -147,7 +145,6 @@ class EngineRunner(
 			block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
 		}
 		try {
-			listeners.forEach { it.onStart(block) }
 			val newOutputs: List<MutableMap<String, Any?>> = when (block.type) {
 				BlockType.MAPPING_GROOVY -> {
 					val inputs = collectInputs(block, project)
@@ -221,7 +218,7 @@ class EngineRunner(
 					if (text.isNotBlank()) {
 						base["trigger"] = text
 					}
-					inputs.forEach { (k, v) ->
+					inputs.forEach { (_, v) ->
 						val map = when (v) {
 							is MutableMap<*, *> -> v as MutableMap<String, Any?>
 							is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
@@ -229,7 +226,6 @@ class EngineRunner(
 						}
 						base.putAll(map)
 					}
-
 					listOf(base)
 				}
 
@@ -247,30 +243,8 @@ class EngineRunner(
 
 				else -> block.outputsData
 			}
-
 			block.outputsData = newOutputs.toMutableList()
-
-			listeners.forEach { it.onOutput(block, mapOf("outputs" to block.outputsData)) }
-		} catch (t: Throwable) {
-			listeners.forEach { it.onError(block, t) }
-			throw t
-		} finally {
-			listeners.forEach { it.onFinish(block) }
-		}
-		val outgoingBlocks = project.connections
-			.filter { it.fromId == block.id }
-			.mapNotNull { conn -> project.blocks.find { it.id == conn.toId } }
-		for (child in outgoingBlocks) {
-			val allInputsReady = project.connections
-				.filter { it.toId == child.id }
-				.mapNotNull { c -> project.blocks.find { it.id == c.fromId } }
-				.all { parent ->
-					parent.outputsData.any { it.isNotEmpty() } ||
-							parent.type in listOf(BlockType.START, BlockType.INPUT_DATA, BlockType.PROPERTIES)
-				}
-			if (allInputsReady) {
-				runBlock(child, project)
-			}
+		} catch (_: Exception) {
 		}
 	}
 
