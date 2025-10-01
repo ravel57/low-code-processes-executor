@@ -3,20 +3,21 @@ package ru.ravel.lcpecore.model
 import com.fasterxml.jackson.annotation.*
 import java.util.*
 
+
 @JsonIgnoreProperties(ignoreUnknown = true)
-data class CoreBlock @JsonCreator constructor(
+data class CoreBlock @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) constructor(
 	@JsonProperty("id")
 	var id: UUID = UUID.randomUUID(),
 
 	@JsonProperty("name")
 	var name: String = "",
 
-	@JsonProperty("type")
-	@JsonAlias("blockType")
+	@JsonProperty("blockType")
+	@JsonAlias("type")
 	var type: BlockType = BlockType.START,
 
-	@JsonProperty("codePath")
-	@JsonAlias("codeFile")
+	@JsonProperty("codeFile")
+	@JsonAlias("codePath")
 	var codePath: String? = null,
 
 	@JsonProperty("inputFormat")
@@ -37,14 +38,13 @@ data class CoreBlock @JsonCreator constructor(
 	@JsonProperty("outputIds")
 	var outputIds: MutableList<UUID> = mutableListOf(),
 
-	var outputsData: MutableList<MutableMap<String, Any?>> = mutableListOf(),
-
 	@JsonProperty("packagesNames")
 	var packagesNames: MutableList<String> = mutableListOf(),
 
 	@JsonProperty("endpoint")
 	var endpoint: String = "",
 
+	@JsonProperty("subProjectProps")
 	var subProjectProps: MutableMap<String, Any?> = mutableMapOf(),
 
 	@JsonProperty("mapKeySettings")
@@ -56,14 +56,19 @@ data class CoreBlock @JsonCreator constructor(
 	@JsonProperty("inputCount")
 	var inputCount: Int = 1,
 
-	@JsonProperty("uiX")
-	@JsonAlias("x")
+	@JsonProperty("x")
+	@JsonAlias("uiX")
 	var uiX: Double? = null,
 
-	@JsonProperty("uiY")
-	@JsonAlias("y")
+	@JsonProperty("y")
+	@JsonAlias("uiY")
 	var uiY: Double? = null,
 ) {
+
+	@JsonIgnore
+	var outputsData: MutableList<MutableMap<String, Any?>> = mutableListOf()
+
+
 	@JsonIgnore
 	fun ensureIoIds() {
 		fun ensure(names: MutableList<String>, ids: MutableList<UUID>) {

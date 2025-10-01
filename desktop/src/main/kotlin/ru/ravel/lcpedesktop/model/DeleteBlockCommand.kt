@@ -22,7 +22,6 @@ class DeleteBlockCommand(
 	private val savedSubProjectPath = block.core.subProjectPath
 	private val savedInputNames = block.core.inputNames.toList()
 	private val savedOutputNames = block.core.outputNames.toList()
-	private val savedOutputsData = block.core.outputsData.map { it.toMutableMap() }.toMutableList()
 	private val savedPackagesNames = block.core.packagesNames.toList()
 	private val savedSubProjectProps = block.core.subProjectProps.toMutableMap()
 	private val savedEndpoint = block.core.endpoint
@@ -47,7 +46,6 @@ class DeleteBlockCommand(
 				subProjectPath = savedSubProjectPath,
 				inputNames = savedInputNames.toMutableList(),
 				outputNames = savedOutputNames.toMutableList(),
-				outputsData = savedOutputsData.map { it.toMutableMap() }.toMutableList(),
 				packagesNames = savedPackagesNames.toMutableList(),
 				subProjectProps = savedSubProjectProps.toMutableMap(),
 				endpoint = savedEndpoint,
