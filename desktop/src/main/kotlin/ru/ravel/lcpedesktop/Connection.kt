@@ -66,7 +66,7 @@ class Connection constructor(
 		fromId = from.core.id,
 		toId = to.core.id,
 		fromOutputId = fromPort,
-		toInputId = toPort
+		toInputId = toPort,
 	)
 
 }

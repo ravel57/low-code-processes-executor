@@ -23,4 +23,7 @@ data class CoreConnection @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) const
 
 	@JsonProperty("toInputIndex")
 	/*TODO delete*/ val toInputIndex: Int? = null,
-)
+) {
+	constructor(fromId: UUID, toId: UUID, fromOutputId: UUID, toInputId: UUID)
+			: this(fromId, toId, fromOutputId, toInputId, null, null)
+}

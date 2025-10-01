@@ -3,6 +3,7 @@ plugins {
 }
 rootProject.name = "low-code-processes-executor"
 
-include(":core", ":desktop")
+include(":core", ":desktop", ":android")
 project(":core").projectDir = file("core")
 project(":desktop").projectDir = file("desktop")
+project(":android").projectDir = file("android")
