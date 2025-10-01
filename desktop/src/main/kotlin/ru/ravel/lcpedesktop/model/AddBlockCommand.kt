@@ -17,7 +17,7 @@ class AddBlockCommand(
 	var block: BlockNode? = null
 
 	override fun execute() {
-		block = app.addBlock(parent, x, y, name, blockType)
+		block = app.addBlock(x, y, name, blockType)
 	}
 
 	override fun undo() {

@@ -30,7 +30,9 @@ import java.io.File
 import kotlin.math.roundToInt
 import com.fasterxml.jackson.databind.ObjectMapper
 import javafx.collections.FXCollections
+import javafx.scene.Group
 import javafx.scene.input.ClipboardContent
+import javafx.scene.input.MouseEvent
 import javafx.scene.input.TransferMode
 import javafx.util.Callback
 import java.util.*
@@ -55,6 +57,7 @@ class BlockNode(
 	val connectedLines = mutableListOf<Connection>()   // UI-связи (отрисовка)
 	private var dragOffsetX = 0.0
 	private var dragOffsetY = 0.0
+
 
 	var onMove: (() -> Unit)? = null
 	var selected: Boolean = false
@@ -88,28 +91,35 @@ class BlockNode(
 		createIOCircles()
 
 		// --- поведение: выбор/перетаскивание/выпуск ---
-		val pressHandler = EventHandler<javafx.scene.input.MouseEvent> { e ->
+		val pressHandler = EventHandler<MouseEvent> { e ->
 			if (e.button == MouseButton.PRIMARY) {
-				val parentPane = parent as Pane
-				val p = parentPane.sceneToLocal(e.sceneX, e.sceneY)
-				dragOffsetX = p.x - layoutX
-				dragOffsetY = p.y - layoutY
+				when (val p = parent) {
+					is Pane -> {
+						p.children.remove(this)
+						p.children.add(this)
+					}
+
+					is Group -> {
+						p.children.remove(this)
+						p.children.add(this)
+					}
+				}
+				dragOffsetX = e.sceneX - layoutX
+				dragOffsetY = e.sceneY - layoutY
 				callbacks.onSelect(this)
 				e.consume()
 			}
 		}
-		val dragHandler = EventHandler<javafx.scene.input.MouseEvent> { e ->
+		val dragHandler = EventHandler<MouseEvent> { e ->
 			if (e.button == MouseButton.PRIMARY) {
-				val parentPane = parent as Pane
-				val p = parentPane.sceneToLocal(e.sceneX, e.sceneY)
-				layoutX = p.x - dragOffsetX
-				layoutY = p.y - dragOffsetY
+				layoutX = e.sceneX - dragOffsetX
+				layoutY = e.sceneY - dragOffsetY
 				updateConnectedLines()
 				onMove?.invoke()
 				e.consume()
 			}
 		}
-		val releaseHandler = EventHandler<javafx.scene.input.MouseEvent> { e ->
+		val releaseHandler = EventHandler<MouseEvent> { e ->
 			if (e.button == MouseButton.PRIMARY) {
 				snapToGrid()
 				updateConnectedLines()
@@ -682,6 +692,21 @@ class BlockNode(
 	}
 
 	private fun createIOCircles() {
+		// 0) Выровнять размеры списков под фактические счётчики
+		val inTarget = maxOf(core.inputCount, core.inputNames.size, core.inputIds.size)
+		val outTarget = maxOf(core.outputCount, core.outputNames.size, core.outputIds.size)
+
+		// входы
+		while (core.inputNames.size < inTarget) core.inputNames += "in${core.inputNames.size}"
+		while (core.inputIds.size < inTarget) core.inputIds += UUID.randomUUID()
+		core.inputCount = inTarget
+
+		// выходы
+		while (core.outputNames.size < outTarget) core.outputNames += "out${core.outputNames.size}"
+		while (core.outputIds.size < outTarget) core.outputIds += UUID.randomUUID()
+		core.outputCount = outTarget
+
+		// 1) дальше — как у вас было
 		val newHeight = computeBlockHeight()
 		rect.height = newHeight; this.prefHeight = newHeight
 
@@ -691,8 +716,7 @@ class BlockNode(
 				val c = Circle(0.0, step * (i + 1), 7.0, Color.LIGHTSKYBLUE).apply {
 					stroke = Color.DARKBLUE
 					strokeWidth = 1.6
-					val inputName = core.inputNames.getOrNull(i) ?: "in$i"
-					Tooltip.install(this, Tooltip(inputName))
+					Tooltip.install(this, Tooltip(core.inputNames.getOrNull(i) ?: "in$i"))
 					properties["portId"] = core.inputIds[i]
 				}
 				inputCircles += c; children += c
@@ -707,7 +731,7 @@ class BlockNode(
 					onMouseClicked = EventHandler { ev ->
 						if (ev.button == MouseButton.PRIMARY && ev.clickCount == 1) {
 							val app = (scene?.window?.userData as? MainApp) ?: return@EventHandler
-							app.showOutputFor(this@BlockNode, i)   // «как раньше»
+							app.showOutputFor(this@BlockNode, i)
 							ev.consume()
 						}
 					}

@@ -10,6 +10,7 @@ import javafx.application.Platform
 import javafx.event.EventHandler
 import javafx.geometry.Insets
 import javafx.scene.Group
+import javafx.scene.Node
 import javafx.scene.Scene
 import javafx.scene.canvas.Canvas
 import javafx.scene.control.*
@@ -313,8 +314,8 @@ class MainApp : Application() {
 		primaryStage.userData = this
 		primaryStage.show()
 		drawGrid(gridCanvas, 10.0)
-		gridCanvas.widthProperty().bind(contentPane.widthProperty())
-		gridCanvas.heightProperty().bind(contentPane.heightProperty())
+		gridCanvas.widthProperty().bind(scrollPane.viewportBoundsProperty().map { it.width })
+		gridCanvas.heightProperty().bind(scrollPane.viewportBoundsProperty().map { it.height })
 		gridCanvas.widthProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
 		gridCanvas.heightProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
 
@@ -335,13 +336,15 @@ class MainApp : Application() {
 									extensionFilters += FileChooser.ExtensionFilter("JSON", "*.json")
 								}
 								fc.showOpenDialog(primaryStage)?.let { file ->
-									val node = addBlock(contentPane, event.x, event.y, file.nameWithoutExtension, type)
+									val node = addBlock(event.x, event.y, file.nameWithoutExtension, type)
 									node.core.subProjectPath = file.absolutePath
 									adjustSubProjectNodeIO(node, file)
 								}
 							}
 
-							else -> addBlock(contentPane, event.x, event.y, type.displayName, type)
+							else -> {
+								addBlock(event.x, event.y, type.displayName, type)
+							}
 						}
 					}
 					ctx.items.add(item)
@@ -361,7 +364,7 @@ class MainApp : Application() {
 				if (!confirmSaveIfDirty()) return@setOnAction
 				blocks.clear()
 				connections.clear()
-				contentPane.children.removeIf { it is BlockNode || it is Line }
+				workspaceGroup.children.removeIf { it is BlockNode || it is Line }
 				currentProjectFile = null
 				clearDirty()
 				updateTitle()
@@ -474,10 +477,12 @@ class MainApp : Application() {
 						return@addEventHandler
 					}
 				}
+
 				e.isControlDown && e.code == KeyCode.S -> {
 					saveBtn.fire()
 					e.consume()
 				}
+
 				e.isControlDown && e.code == KeyCode.Z && !e.isShiftDown -> {
 					undoStack.poll()?.let {
 						it.undo()
@@ -486,6 +491,7 @@ class MainApp : Application() {
 					}
 					e.consume()
 				}
+
 				e.isControlDown && e.isShiftDown && e.code == KeyCode.Z -> {
 					redoStack.poll()?.let {
 						it.execute()
@@ -610,7 +616,7 @@ class MainApp : Application() {
 		}
 	}
 
-	fun addBlock(parent: Pane, x: Double, y: Double, name: String, blockType: BlockType): BlockNode {
+	fun addBlock(x: Double, y: Double, name: String, blockType: BlockType): BlockNode {
 		val core = CoreBlock(name = name, type = blockType).apply {
 			when (blockType) {
 				BlockType.START -> {
@@ -661,14 +667,15 @@ class MainApp : Application() {
 					markDirty()
 				}
 			},
-			callbacks = callbacks
+			callbacks = callbacks,
 		)
 		blocks.add(block)
 		block.onMove = {
+			ensureWorkspaceFits(block)
 			ensureBlockVisible(block)
 			markDirty()
 		}
-		parent.children.add(block)
+		workspaceGroup.children.add(block)
 		setupHandlersForBlock(block)
 		markDirty()
 		return block
@@ -695,18 +702,16 @@ class MainApp : Application() {
 
 
 	fun deleteBlockRequest(block: BlockNode) {
-		val toRemove = connections.filter { it.from == block || it.to == block }
-		toRemove.forEach { conn ->
-			(conn.line.parent as? Pane)?.children?.remove(conn.line)
-			conn.from.connectedLines.remove(conn)
-			conn.to.connectedLines.remove(conn)
+		val toRemove = connections.filter { it.from == block || it.to == block }.toList()
+		toRemove.forEach {
+			removeConnection(it)
 		}
-		connections.removeAll(toRemove)
-		(block.parent as? Pane)?.children?.remove(block)
+		detach(block)
 		blocks.remove(block)
 		selectedBlock = null
 		markDirty()
 	}
+
 
 	fun selectBlock(block: BlockNode?) {
 		blocks.forEach { it.selected = false }
@@ -715,6 +720,7 @@ class MainApp : Application() {
 		block?.selected = true
 		selectedConnection = null
 	}
+
 
 	private fun selectConnection(conn: Connection?) {
 		connections.forEach {
@@ -729,6 +735,7 @@ class MainApp : Application() {
 		}
 		selectedBlock = null
 	}
+
 
 	private fun setupContextMenu() {
 		val showMenu = EventHandler<MouseEvent> { ev ->
@@ -771,7 +778,9 @@ class MainApp : Application() {
 							strokeWidth = 2.0
 							viewOrder = 1.0
 						}
-						contentPane.children.add(tmp)
+						if (tmp.parent != workspaceGroup) {
+							workspaceGroup.children.add(tmp)
+						}
 						draggingLine = tmp
 						draggingFromBlock = block
 						draggingFromOutputId = outId
@@ -790,10 +799,9 @@ class MainApp : Application() {
 					if (!draggingStarted) return@EventHandler
 
 					val panePt = contentPane.sceneToLocal(event.sceneX, event.sceneY)
-					// ищем вход, над которым отпустили
 					val hit = blocks.asSequence().flatMap { other ->
 						other.inputCircles.mapIndexed { i, c -> Triple(other, i, c) }
-					}.firstOrNull { (other, i, c) ->
+					}.firstOrNull { (other, _, c) ->
 						if (other == draggingFromBlock) return@firstOrNull false
 						val sc = c.localToScene(c.centerX, c.centerY)
 						val pc = contentPane.sceneToLocal(sc.x, sc.y)
@@ -813,51 +821,44 @@ class MainApp : Application() {
 							stroke = Color.BLUE
 							strokeWidth = 2.0
 						}
-						val pick = Line().apply {
+						val pick = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
 							stroke = Color.TRANSPARENT
 							strokeWidth = 12.0
 							isPickOnBounds = false
 							viewOrder = 0.9
 						}
-						val conn = Connection(
-							from = draggingFromBlock!!,
-							to = toBlock,
-							line = visible,
-							pick = pick,
-							fromPort = draggingFromOutputId!!,                         // ← важно
-							toPort = toBlock.core.inputIds[inputIdx]
-						)
+						val conn =
+							Connection(block, toBlock, visible, draggingFromOutputId!!, toBlock.core.inputIds[inputIdx], pick)
 						conn.updateLine()
 						connections.add(conn)
-						if (visible.parent == null) contentPane.children.add(visible)
-						if (pick.parent == null) contentPane.children.add(pick)
-
-						pick.onMouseClicked = EventHandler { e ->
-							if (e.button == MouseButton.PRIMARY) {
-								selectConnection(conn); (pick.parent as? Pane)?.requestFocus(); e.consume()
+						if (!workspaceGroup.children.contains(visible)) {
+							workspaceGroup.children.add(visible)
+						}
+						if (!workspaceGroup.children.contains(pick)) {
+							workspaceGroup.children.add(pick)
+						}
+						pick.onMouseClicked = EventHandler { ev ->
+							if (ev.button == MouseButton.PRIMARY) {
+								selectConnection(conn)
+								(pick.parent as? Pane)?.requestFocus()
+								ev.consume()
 							}
 						}
 
-						draggingFromBlock!!.layoutXProperty().addListener { _, _, _ -> conn.updateLine() }
-						draggingFromBlock!!.layoutYProperty().addListener { _, _, _ -> conn.updateLine() }
-						toBlock.layoutXProperty().addListener { _, _, _ -> conn.updateLine() }
-						toBlock.layoutYProperty().addListener { _, _, _ -> conn.updateLine() }
-
-						contentPane.children.remove(draggingLine)
-						draggingFromBlock!!.connectedLines.add(conn)
+						block.connectedLines.add(conn)
 						toBlock.connectedLines.add(conn)
-						markDirty()
-					} else {
-						contentPane.children.remove(draggingLine)
 					}
 
+					// убираем временную линию
+					workspaceGroup.children.remove(draggingLine)
 					draggingLine = null
-					draggingFromOutputId = null
+					draggingStarted = false
 					event.consume()
 				}
 			}
 		}
 	}
+
 
 	/** Модалка с pretty JSON данными выхода */
 	fun showOutputFor(block: BlockNode, outIndex: Int) {
@@ -945,60 +946,46 @@ class MainApp : Application() {
 		dialog.show()
 	}
 
+
 	private fun drawGrid(canvas: Canvas, grid: Double = 10.0, boldStep: Int = 5) {
 		val gc = canvas.graphicsContext2D
 		gc.clearRect(0.0, 0.0, canvas.width, canvas.height)
 		val w = canvas.width
-
 		val h = canvas.height
+		val offsetX = contentPane.layoutX % grid
+		val offsetY = contentPane.layoutY % grid
 		gc.stroke = Color.rgb(180, 180, 180, 0.25)
 		gc.lineWidth = 1.0
-		var x = 0.0
+		var x = -offsetX
 		while (x <= w) {
 			gc.strokeLine(x, 0.0, x, h)
 			x += grid
 		}
-		var y = 0.0
+		var y = -offsetY
 		while (y <= h) {
 			gc.strokeLine(0.0, y, w, y)
 			y += grid
 		}
 		gc.stroke = Color.rgb(120, 120, 120, 0.5)
 		gc.lineWidth = 2.0
-		x = 0.0
+		x = -offsetX
+		var step = grid * boldStep
 		while (x <= w) {
-			if ((x / grid) % boldStep == 0.0) gc.strokeLine(x, 0.0, x, h)
-			x += grid
+			if (((x + offsetX) / grid) % boldStep == 0.0) {
+				gc.strokeLine(x, 0.0, x, h)
+			}
+			x += step
 		}
-		y = 0.0
+		y = -offsetY
 		while (y <= h) {
-			if ((y / grid) % boldStep == 0.0) gc.strokeLine(0.0, y, w, y)
-			y += grid
+			if (((y + offsetY) / grid) % boldStep == 0.0) {
+				gc.strokeLine(0.0, y, w, y)
+			}
+			y += step
 		}
 		gc.lineWidth = 1.0
 	}
 
-	private fun uiListener(): ExecutionListener = object : ExecutionListener {
-		override fun onStart(block: CoreBlock) {
-			val ui = blocks.find { it.core.id == block.id }
-			Platform.runLater { ui?.executing = true }
-		}
-
-		override fun onFinish(block: CoreBlock) {
-			val ui = blocks.find { it.core.id == block.id }
-			Platform.runLater { ui?.executing = false }
-		}
-
-		override fun onError(block: CoreBlock, error: Throwable) {
-			Platform.runLater {
-				Alert(Alert.AlertType.ERROR).apply {
-					title = block.name
-					contentText = error.localizedMessage
-					showAndWait()
-				}
-			}
-		}
-	}
 
 	/** Собираем CoreProject из текущего UI */
 	private fun collectCoreProject(): CoreProject {
@@ -1007,16 +994,16 @@ class MainApp : Application() {
 		return CoreProject(coreBlocks, coreConns)
 	}
 
+
 	/** Восстановление UI из core-проекта (после load) */
 	private fun restoreUiFromCore(project: CoreProject) {
 		suppressDirty = true
 		try {
+			contentPane.children.setAll(gridCanvas, workspaceGroup)
 			blocks.clear()
 			connections.clear()
-			contentPane.children.removeIf { it is BlockNode || it is Line }
-
+			workspaceGroup.children.removeIf { it is BlockNode || it is Line }
 			val idToUi = mutableMapOf<UUID, BlockNode>()
-
 			project.blocks.forEach { cb ->
 				val b = BlockNode(
 					core = cb,
@@ -1031,14 +1018,19 @@ class MainApp : Application() {
 						core.codePath = file.absolutePath
 						markDirty()
 					},
-					callbacks = callbacks
+					callbacks = callbacks,
 				)
 				if (b.core.type == BlockType.SUB_PROJECT && b.core.subProjectPath.isNotBlank()) {
 					val f = File(b.core.subProjectPath)
 					if (f.exists()) adjustSubProjectNodeIO(b, f)
 				}
-				blocks += b
-				(scrollPane.content as? Pane)?.children?.add(b)
+				b.onMove = {
+					ensureWorkspaceFits(b)
+					ensureBlockVisible(b)
+					markDirty()
+				}
+				blocks.add(b)
+				workspaceGroup.children.add(b)
 				setupHandlersForBlock(b)
 				idToUi[cb.id] = b
 			}
@@ -1054,25 +1046,32 @@ class MainApp : Application() {
 					return@forEach
 				}
 				val fromCenter = fromCircle.localToScene(fromCircle.centerX, fromCircle.centerY)
-				val fromPoint = contentPane.sceneToLocal(fromCenter.x, fromCenter.y)
 				val toCenter = toCircle.localToScene(toCircle.centerX, toCircle.centerY)
-				val toPoint = contentPane.sceneToLocal(toCenter.x, toCenter.y)
-				val visible = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
+				val p1 = contentPane.sceneToLocal(fromCenter.x, fromCenter.y)
+				val p2 = contentPane.sceneToLocal(toCenter.x, toCenter.y)
+
+				val visible = Line(p1.x, p1.y, p2.x, p2.y).apply {
 					stroke = Color.BLUE
 					strokeWidth = 2.0
 				}
-				val pick = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
+				val pick = Line(p1.x, p1.y, p2.x, p2.y).apply {
 					stroke = Color.TRANSPARENT
 					strokeWidth = 12.0
 					isPickOnBounds = false
+					viewOrder = 0.9
 				}
-				val conn = Connection(from, to, visible, c.toInputId, c.fromOutputId, pick)
-				connections.add(conn)
-				if (visible.parent == null) {
-					contentPane.children.add(visible)
+				val conn = Connection(from, to, visible, c.fromOutputId, c.toInputId, pick)
+				conn.updateLine()
+				connections += conn
+				(visible.parent as? Pane)?.children?.remove(visible)
+				(pick.parent as? Pane)?.children?.remove(pick)
+				(visible.parent as? Group)?.children?.remove(visible)
+				(pick.parent as? Group)?.children?.remove(pick)
+				if (visible.parent != workspaceGroup) {
+					workspaceGroup.children.add(visible)
 				}
-				if (pick.parent == null) {
-					contentPane.children.add(pick)
+				if (pick.parent != workspaceGroup) {
+					workspaceGroup.children.add(pick)
 				}
 				pick.onMouseClicked = EventHandler { ev ->
 					if (ev.button == MouseButton.PRIMARY) {
@@ -1081,8 +1080,10 @@ class MainApp : Application() {
 						ev.consume()
 					}
 				}
-				(scrollPane.content as? Pane)?.children?.addAll(pick, visible)
-				connections += conn
+				from.layoutXProperty().addListener { _, _, _ -> conn.updateLine() }
+				from.layoutYProperty().addListener { _, _, _ -> conn.updateLine() }
+				to.layoutXProperty().addListener { _, _, _ -> conn.updateLine() }
+				to.layoutYProperty().addListener { _, _, _ -> conn.updateLine() }
 				from.connectedLines.add(conn)
 				to.connectedLines.add(conn)
 			}
@@ -1106,10 +1107,18 @@ class MainApp : Application() {
 
 
 	private fun updateTitle() {
-		if (!this::stage.isInitialized) return
-		val base = currentProjectFile?.name?.removeSuffix(".json") ?: "Low code processes executor"
-		stage.title = if (isDirty) "• $base" else base
+		if (!this::stage.isInitialized) {
+			return
+		}
+		val base = currentProjectFile?.name?.removeSuffix(".json")
+			?: "Low code processes executor"
+		stage.title = if (isDirty) {
+			"• $base"
+		} else {
+			base
+		}
 	}
+
 
 	private fun markDirty() {
 		if (!suppressDirty && !isDirty) {
@@ -1118,12 +1127,14 @@ class MainApp : Application() {
 		}
 	}
 
+
 	private fun clearDirty() {
 		if (isDirty) {
 			isDirty = false
 			updateTitle()
 		}
 	}
+
 
 	private fun confirmSaveIfDirty(): Boolean {
 		if (!isDirty) return true
@@ -1188,12 +1199,14 @@ class MainApp : Application() {
 		return File(dir, "$base.$ext")
 	}
 
+
 	private fun loadCodeFromDisk(b: CoreBlock): String {
 		val path = b.codePath ?: return ""
 		val base = currentProjectFile?.parentFile
 		val f = File(path).let { if (it.isAbsolute) it else File(base, path) }
 		return runCatching { f.readText() }.getOrElse { "" }
 	}
+
 
 	private fun saveCodeToDisk(b: CoreBlock, text: String) {
 		val baseDir = currentProjectFile?.parentFile ?: File(".")
@@ -1281,6 +1294,7 @@ class MainApp : Application() {
 		updateTitle()
 	}
 
+
 	/** Совместимость со старым кодом (раньше вызывалось после importBlocksFromFile). */
 	private fun importOutputsData(file: File) {
 		val project = collectCoreProject()
@@ -1289,12 +1303,59 @@ class MainApp : Application() {
 	}
 
 
+	private fun detach(node: Node?) {
+		if (node == null) {
+			return
+		}
+		when (val p = node.parent) {
+			is Pane  -> p.children.remove(node)
+			is Group -> p.children.remove(node)
+		}
+	}
+
+
 	private fun removeConnection(conn: Connection) {
 		connections.remove(conn)
 		conn.from.connectedLines.remove(conn)
 		conn.to.connectedLines.remove(conn)
-		(conn.line.parent as? Pane)?.children?.remove(conn.line)
-		(conn.pick.parent as? Pane)?.children?.remove(conn.pick)
+		detach(conn.line)
+		detach(conn.pick)
+	}
+
+
+	private fun ensureWorkspaceFits(b: BlockNode) {
+		val blockRight = b.layoutX + b.boundsInParent.width
+		val blockBottom = b.layoutY + b.boundsInParent.height
+		val blockLeft = b.layoutX
+		val blockTop = b.layoutY
+		var changed = false
+		// вправо
+		if (blockRight > contentPane.prefWidth) {
+			contentPane.prefWidth = blockRight + 50
+			changed = true
+		}
+		// вниз
+		if (blockBottom > contentPane.prefHeight) {
+			contentPane.prefHeight = blockBottom + 50
+			changed = true
+		}
+		// влево
+		if (blockLeft < 0) {
+			val shift = -blockLeft
+			contentPane.prefWidth += shift
+			contentPane.translateX += shift
+			changed = true
+		}
+		// вверх
+		if (blockTop < 0) {
+			val shift = -blockTop
+			contentPane.prefHeight += shift
+			contentPane.translateY += shift
+			changed = true
+		}
+		if (changed) {
+			contentPane.requestLayout()
+		}
 	}
 
 
