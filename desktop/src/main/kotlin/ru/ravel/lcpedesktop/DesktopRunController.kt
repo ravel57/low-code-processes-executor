@@ -31,7 +31,6 @@ class DesktopRunController(
 	/** Запускает вычисление в фоне. Возвращает Future, чтобы UI мог по желанию ждать/отменять. */
 	fun runAsync(project: CoreProject, projectFile: File?, events: RunEvents): Future<*> {
 		return executor.submit {
-			// Собираем runner без UI-зависимостей и прокидываем события наружу
 			val runner = EngineRunner(
 				groovy = groovy,
 				python = python,
@@ -45,9 +44,7 @@ class DesktopRunController(
 						events.onOutput(block, payload)
 				})
 			)
-			runner.run(project) // собственно выполнение графа
-
-			// Персистим результат только здесь (логика), UI об этом не знает.
+			runner.run(project)
 			if (projectFile != null) {
 				outputsRepo.saveOutputs(projectFile, project)
 			}

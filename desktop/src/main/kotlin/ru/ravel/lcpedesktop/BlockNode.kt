@@ -370,7 +370,13 @@ class BlockNode(
 			}
 
 			else -> {
-				TabPane(makeCodeTab(), makeIOTab())
+				val tabPane = TabPane(makeCodeTab(), makeIOTab())
+				if (core.type == BlockType.MAPPING_PYTHON) {
+					val pipBox = buildEditablePipBox()
+					val pipTab = Tab("pip", pipBox).apply { isClosable = false }
+					tabPane.tabs.add(pipTab)
+				}
+				tabPane
 			}
 		}
 
@@ -432,6 +438,19 @@ class BlockNode(
 					core.outputCount = core.outputNames.size
 				}
 
+				if (core.type == BlockType.MAPPING_PYTHON) {
+					tabs?.tabs?.firstOrNull { it.text == "pip" }?.let { pipTab ->
+						val vbox = pipTab.content as VBox
+						val scroll = vbox.children[1] as ScrollPane
+						val rows = scroll.content as VBox
+						val newPackages = rows.children.mapNotNull { row ->
+							val tf = (row as HBox).children[0] as TextField
+							tf.text.trim().takeIf { it.isNotBlank() }
+						}
+						core.packagesNames = newPackages.toMutableList()
+					}
+				}
+
 				recreateIOCircles()
 				callbacks.onModelChanged(core)
 				dialog.close()
@@ -449,6 +468,40 @@ class BlockNode(
 		dialog.initModality(Modality.APPLICATION_MODAL)
 		dialog.showAndWait()
 	}
+
+
+	private fun buildEditablePipBox(): VBox {
+		val pipBox = VBox(4.0)
+		val scrollContent = VBox(4.0)
+		val scrollPane = ScrollPane(scrollContent).apply {
+			prefHeight = 180.0
+			isFitToWidth = true
+			vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
+		}
+		val addBtn = Button("+").apply {
+			setOnAction { addPipRow(scrollContent) }
+		}
+		val header = HBox(6.0, Label("pip пакеты:"), addBtn)
+		pipBox.children.addAll(header, scrollPane)
+		core.packagesNames.forEach { pkg ->
+			addPipRow(scrollContent, pkg)
+		}
+		return pipBox
+	}
+
+
+	private fun addPipRow(container: VBox, initialText: String = "") {
+		val tf = TextField(initialText)
+		lateinit var box: HBox
+		val delBtn = Button("–").apply {
+			setOnAction {
+				container.children.remove(box)
+			}
+		}
+		box = HBox(6.0, tf, delBtn).apply { alignment = Pos.CENTER_LEFT }
+		container.children.add(box)
+	}
+
 
 	private fun buildEditableInputsBox(): VBox {
 		val rows = VBox(4.0)
@@ -533,7 +586,6 @@ class BlockNode(
 				val c = Circle(0.0, step * (i + 1), 7.0, Color.LIGHTSKYBLUE).apply {
 					stroke = Color.DARKBLUE; strokeWidth = 1.6
 					Tooltip.install(this, Tooltip(core.inputNames.getOrNull(i) ?: "in$i"))
-					isMouseTransparent = true
 				}
 				inputCircles += c; children += c
 			}

@@ -153,20 +153,13 @@ class EngineRunner(
 
 	/** Исполнение одного блока */
 	private fun runBlock(block: CoreBlock, project: CoreProject) {
-		// для небазовых блоков гарантируем структуру выходов
 		if (!block.type.isService()) {
 			block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
 		}
-
 		try {
 			listeners.forEach { it.onStart(block) }
-
-			// --- сначала считаем новые выходы ---
 			val newOutputs: List<MutableMap<String, Any?>> = when (block.type) {
 				BlockType.MAPPING_GROOVY -> {
-					if(block.name == "String to map") {
-						println()
-					}
 					val inputs = collectInputs(block, project)
 					val outputs = prepareOutputs(block)
 					val code = readCode(block)
@@ -216,12 +209,18 @@ class EngineRunner(
 				}
 
 				BlockType.START -> {
-					val text = readCode(block)
-					val map = mutableMapOf<String, Any?>()
-					if (text.isNotBlank()) {
-						map["trigger"] = text.trim()
+					val text = readCode(block).trim()
+					val current = block.outputsData.map { it.toMutableMap() }.toMutableList()
+					if (current.isEmpty()) {
+						val first = mutableMapOf<String, Any?>()
+						if (text.isNotBlank()) first["trigger"] = text
+						listOf(first)
+					} else {
+						if (text.isNotBlank()) {
+							current[0]["trigger"] = text
+						}
+						current
 					}
-					listOf(map)
 				}
 
 				BlockType.SUB_PROJECT -> {
@@ -239,7 +238,6 @@ class EngineRunner(
 				else -> block.outputsData
 			}
 
-			// --- фикс: обновляем выходы ДО запуска потомков ---
 			block.outputsData = newOutputs.toMutableList()
 
 			listeners.forEach { it.onOutput(block, mapOf("outputs" to block.outputsData)) }
@@ -249,12 +247,9 @@ class EngineRunner(
 		} finally {
 			listeners.forEach { it.onFinish(block) }
 		}
-
-		// --- запускаем потомков ---
 		val outgoingBlocks = project.connections
 			.filter { it.fromId == block.id }
 			.mapNotNull { conn -> project.blocks.find { it.id == conn.toId } }
-
 		for (child in outgoingBlocks) {
 			val allInputsReady = project.connections
 				.filter { it.toId == child.id }
@@ -263,14 +258,12 @@ class EngineRunner(
 					parent.outputsData.any { it.isNotEmpty() } ||
 							parent.type in listOf(BlockType.START, BlockType.INPUT_DATA, BlockType.PROPERTIES)
 				}
-
 			if (allInputsReady) {
 				runBlock(child, project)
 			}
 		}
 	}
 
-	// ---------- Helpers ----------
 
 	private fun collectInputs(block: CoreBlock, project: CoreProject): MutableMap<String, Any?> {
 		val inputs = mutableMapOf<String, Any?>()

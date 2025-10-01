@@ -47,8 +47,8 @@ class CoreSubProjectRunner(
 		val startBlocks = sub.blocks.filter { it.type == BlockType.START }
 		val inputDataBlank = sub.blocks.filter { it.type == BlockType.INPUT_DATA && (it.codePath.isNullOrBlank()) }
 
-		val receivers = (startBlocks + inputDataBlank)
-		val byName = receivers.associateBy { it.name } // имена портов SUB_PROJECT = имена START/INPUT_DATA
+		val receivers = sub.blocks.filter { it.type == BlockType.START || it.type == BlockType.INPUT_DATA }
+		val byName = receivers.associateBy { it.name }
 
 		fun asMutableMap(v: Any?): MutableMap<String, Any?> = when (v) {
 			is MutableMap<*, *> -> (v as MutableMap<String, Any?>)
@@ -67,25 +67,13 @@ class CoreSubProjectRunner(
 		incoming.forEach { c ->
 			val src = outerProject.blocks.firstOrNull { it.id == c.fromId }
 			val value = asMutableMap(src?.outputsData?.getOrNull(c.fromOutputIndex))
-
 			val portName = parentBlock.inputNames.getOrNull(c.toInputIndex)
-
-			// Кому кладём данные
 			val target = when {
-				startBlocks.size == 1 -> startBlocks.first()              // один общий START — обычный кейс
 				portName != null && byName.containsKey(portName) -> byName[portName]!!
-				else -> receivers.getOrNull(c.toInputIndex) ?: startBlocks.firstOrNull()
+				else -> receivers.getOrNull(c.toInputIndex)
 			} ?: return@forEach
-
-			if (target.type == BlockType.START) {
-				// Куда именно (в какой out) кладём внутри START
-				val outIdxByName = if (portName != null) target.outputNames.indexOf(portName) else -1
-				val outIndex = if (outIdxByName >= 0) outIdxByName else c.toInputIndex
-				putOut(target, outIndex, value)
-			} else {
-				// INPUT_DATA (обычно один выход — out0)
-				putOut(target, 0, value)
-			}
+			val outIndex = if (portName != null) target.outputNames.indexOf(portName).takeIf { it >= 0 } ?: 0 else c.toInputIndex
+			putOut(target, outIndex, value)
 		}
 
 		// 4) Запуск подпроекта тем же ядром
@@ -98,21 +86,27 @@ class CoreSubProjectRunner(
 		runner.run(sub)
 
 		// 5) Сбор EXIT-ов
-		val exitsByName = sub.blocks.filter { it.type == BlockType.EXIT }.associateBy { it.name }
-		val out = parentBlock.outputNames.map { name ->
-			val ex = exitsByName[name] ?: return@map mutableMapOf<String, Any?>()
+		val innerExits = sub.blocks.filter { it.type == BlockType.EXIT }
+		val exitsByName = innerExits.associateBy { it.name }
+		val out = parentBlock.outputNames.mapIndexed { idx, name ->
+			val ex = exitsByName[name] ?: innerExits.getOrNull(idx)
+			?: return@mapIndexed mutableMapOf<String, Any?>()
 			val merged = mutableMapOf<String, Any?>()
 			sub.connections
 				.filter { it.toId == ex.id }
 				.sortedBy { it.toInputIndex }
 				.forEach { ic ->
-					val s = sub.blocks.firstOrNull { it.id == ic.fromId }
-					val mm = asMutableMap(s?.outputsData?.getOrNull(ic.fromOutputIndex))
+					val src = sub.blocks.firstOrNull { it.id == ic.fromId }
+					val mm = when (val v = src?.outputsData?.getOrNull(ic.fromOutputIndex)) {
+						is MutableMap<*, *> -> (v as MutableMap<String, Any?>).toMutableMap()
+						is Map<*, *>       -> (v as Map<String, Any?>).toMutableMap()
+						null               -> mutableMapOf()
+						else               -> mutableMapOf("value" to v)
+					}
 					merged.putAll(mm)
 				}
 			merged
 		}.toMutableList()
-
 		while (out.size < parentBlock.outputNames.size) out += mutableMapOf()
 		return out.take(parentBlock.outputNames.size)
 	}

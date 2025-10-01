@@ -1,7 +1,10 @@
 package ru.ravel.lcpedesktop
 
+import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
+import groovy.lang.Binding
+import groovy.lang.GroovyShell
 import javafx.application.Application
 import javafx.application.Platform
 import javafx.event.EventHandler
@@ -171,17 +174,17 @@ class MainApp : Application() {
 
 
 	override fun init() {
-//		projectRepo = JsonProjectRepository()
-//		outputsRepo = JsonOutputsRepository()
-		groovy = GroovyExecutorImpl() /*object : GroovyExecutor {
-			override fun exec(code: String, bindings: Map<String, Any?>) {
-				val cl = this::class.java.classLoader
-				val shell = GroovyShell(cl)
-				val binding = shell.context
-				bindings.forEach { (k, v) -> binding.setProperty(k, v) }
-				shell.evaluate(code)
+		groovy = object : GroovyExecutor {
+			override fun exec(code: String, bindings: Map<String, Any?>): Any? {
+				val binding = Binding(bindings.toMutableMap())
+				val shell = GroovyShell(binding)
+				val result = shell.evaluate(code)
+				if (bindings is MutableMap<String, Any?>) {
+					bindings.putAll(binding.variables as Map<out String, Any?>)
+				}
+				return result
 			}
-		}*/
+		}
 		python = object : PythonExecutor {
 			override fun exec(
 				block: CoreBlock,
@@ -192,38 +195,50 @@ class MainApp : Application() {
 				val tmp = "run/python/${block.id}_${block.hashCode()}"
 				val venvDirPath = Paths.get("").toAbsolutePath().resolve(tmp).apply { Files.createDirectories(this) }
 				val venvDir = venvDirPath.toAbsolutePath().toString()
-
-				// создаём venv
 				ProcessBuilder(PYTHON, "-m", "venv", venvDir)
 					.redirectErrorStream(true)
 					.start()
 					.waitFor()
-
 				val isWindows = System.getProperty("os.name").startsWith("Windows")
-				val pipPath = if (isWindows) "$venvDir/Scripts/pip.exe" else "$venvDir/bin/pip"
+				val pipPath = if (isWindows) {
+					"$venvDir/Scripts/pip.exe"
+				} else {
+					"$venvDir/bin/pip"
+				}
 				if (block.packagesNames.isNotEmpty()) {
 					ProcessBuilder(pipPath, "install", *block.packagesNames.toTypedArray())
 						.inheritIO()
 						.start()
 						.waitFor()
 				}
-				val pythonPath = if (isWindows) "$venvDir/Scripts/python.exe" else "$venvDir/bin/python"
-
+				val pythonPath = if (isWindows) {
+					"$venvDir/Scripts/python.exe"
+				} else {
+					"$venvDir/bin/python"
+				}
 				val paramsJson = ObjectMapper().writeValueAsString(bindings)
 				val codeText = block.codePath?.let { File(it).readText() } ?: ""
+				val initOutputs = buildString {
+					block.outputNames.forEach { name ->
+						append("$name = {}\n")
+					}
+				}
+				val pyOutputs = block.outputNames.joinToString(", ") { "\"$it\": $it" }
 
 				val fullScript = """
-					        |import os, json
-					        |params = json.loads(os.environ.get("$PYTHON_PARAMS_VARIABLE", "{}"))
-					        |locals().update(params)
-					        |
-					        |$codeText
-					        |
-					        |print(json.dumps({${outputs.keys.joinToString(", ") { "\"$it\": $it" }}}))
-					    """.trimMargin()
-
-				val scriptPath = File(venvDir, "script.py").apply { writeText(fullScript, StandardCharsets.UTF_8) }
-
+		            |import os, json
+		            |params = json.loads(os.environ.get("$PYTHON_PARAMS_VARIABLE", "{}"))
+		            |locals().update(params)
+		            |
+		            |$initOutputs
+		            |
+		            |$codeText
+		            |
+		            |print(json.dumps({$pyOutputs}))
+		        """.trimMargin()
+				val scriptPath = File(venvDir, "script.py").apply {
+					writeText(fullScript, StandardCharsets.UTF_8)
+				}
 				val proc = ProcessBuilder(pythonPath, scriptPath.toString())
 					.redirectErrorStream(true)
 					.apply {
@@ -231,15 +246,16 @@ class MainApp : Application() {
 						environment()["PYTHONIOENCODING"] = "utf-8"
 					}
 					.start()
-
 				val output = proc.inputStream.bufferedReader().readText()
 				proc.waitFor()
 				File(venvDir).deleteRecursively()
-
-				val lastLine = output.lines().lastOrNull { it.trim().startsWith("{") && it.trim().endsWith("}") }
+				val lastLine = output.lines().lastOrNull {
+					it.trim().startsWith("{") && it.trim().endsWith("}")
+				}
 				return if (lastLine != null) {
-					@Suppress("UNCHECKED_CAST")
-					ObjectMapper().readValue(lastLine, Map::class.java) as Map<String, MutableMap<String, Any?>>
+					val typeRef = object : TypeReference<Map<String, Any?>>() {}
+					val parsed = ObjectMapper().readValue(lastLine, typeRef)
+					parsed
 				} else {
 					if (output.contains("Traceback")) throw RuntimeException(output)
 					emptyMap()
