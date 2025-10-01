@@ -650,6 +650,8 @@ class MainApp : Application() {
 				else -> {
 					inputCount = 1
 					outputCount = 1
+					inputNames  = mutableListOf("in0")
+					outputNames = mutableListOf("out0")
 				}
 			}
 		}
@@ -660,12 +662,23 @@ class MainApp : Application() {
 			y = y,
 			loadCode = { b -> b.codePath?.let { File(it).takeIf(File::exists)?.readText() } ?: "" },
 			saveCode = { b, text ->
-				val file = b.codePath?.let { File(it) } ?: codeFileFor(b)
-				if (file != null) {
-					file.writeText(text)
-					b.codePath = file.absolutePath
-					markDirty()
+				val file = if (b.type == BlockType.INPUT_DATA) {
+					val desiredExt = when (b.inputFormat) {
+						InputFormatType.JSON -> "json"
+						InputFormatType.XML  -> "xml"
+						InputFormatType.YAML -> "yaml"
+						else -> "txt"
+					}
+					val current = b.codePath?.let { File(it) }
+					val needNew = current == null || !current.name.endsWith(".$desiredExt", ignoreCase = true)
+					if (needNew) codeFileFor(b) else current!!
+				} else {
+					b.codePath?.let { File(it) } ?: codeFileFor(b)
 				}
+
+				file.writeText(text)
+				b.codePath = file.absolutePath
+				markDirty()
 			},
 			callbacks = callbacks,
 		)

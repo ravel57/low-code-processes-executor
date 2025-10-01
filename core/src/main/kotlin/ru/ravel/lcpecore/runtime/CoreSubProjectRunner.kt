@@ -66,16 +66,18 @@ class CoreSubProjectRunner(
 		}
 
 		incoming.forEach { c ->
-			val portName = parentBlock.inputNames.getOrNull(parentBlock.indexOfInput(c.toInputId))
+			val src = outerProject.blocks.firstOrNull { it.id == c.fromId } ?: return@forEach
+			val srcOutIdx = src.indexOfOutput(c.fromOutputId)
+			val value: MutableMap<String, Any?> =
+				asMutableMap(src.outputsData.getOrNull(srcOutIdx))
+			val inIdx = parentBlock.indexOfInput(c.toInputId)
+			val portName = parentBlock.inputNames.getOrNull(inIdx)
 			val target = when {
 				portName != null && byName.containsKey(portName) -> byName[portName]!!
-				else -> receivers.getOrNull(parentBlock.indexOfInput(c.toInputId))
+				else -> receivers.getOrNull(inIdx)
 			} ?: return@forEach
-			val outIndex = if (portName != null) {
-				target.outputNames.indexOf(portName).takeIf { it >= 0 } ?: 0
-			} else {
-				parentBlock.indexOfInput(c.toInputId)
-			}
+			val outIndex = portName?.let { nm -> target.outputNames.indexOf(nm).takeIf { it >= 0 } } ?: 0
+			putOut(target, outIndex, value)
 		}
 
 		// 4) Запуск подпроекта тем же ядром
@@ -100,7 +102,7 @@ class CoreSubProjectRunner(
 				.forEach { ic ->
 					val src = sub.blocks.firstOrNull { it.id == ic.fromId }
 					val mm = when (val v = src?.outputsData?.getOrNull(src.indexOfOutput(ic.fromOutputId))) {
-						is MutableMap<*, *> -> v.toMutableMap() as MutableMap<String, Any?>
+						is MutableMap<*, *> -> v.toMutableMap()
 						is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
 						null -> mutableMapOf()
 						else -> mutableMapOf("value" to v)

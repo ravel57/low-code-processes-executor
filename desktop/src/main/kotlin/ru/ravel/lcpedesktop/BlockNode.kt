@@ -236,7 +236,9 @@ class BlockNode(
 				RadioButton(fmt.name).apply {
 					toggleGroup = group
 					isSelected = (fmt == core.inputFormat)
-					setOnAction { core.inputFormat = fmt }
+					setOnAction {
+						core.inputFormat = fmt
+					}
 				}
 			}
 			val box = VBox(8.0, *radios.toTypedArray()).apply { padding = Insets(8.0) }

@@ -190,27 +190,47 @@ class EngineRunner(
 				}
 
 				BlockType.INPUT_DATA -> {
+					val inputs = collectInputs(block, project)
 					val text = readCode(block)
 					val parsed: MutableMap<String, Any?> = InputParsers.parse(block.inputFormat, text)
 						.mapValues { it.value }
 						.toMutableMap()
-					if (parsed.isEmpty() && text.isNotBlank()) parsed["data"] = text
+					if (parsed.isEmpty() && text.isNotBlank()) {
+						parsed["data"] = text
+					}
+					inputs.forEach { (_, v) ->
+						val map = when (v) {
+							is MutableMap<*, *> -> v as MutableMap<String, Any?>
+							is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
+							else -> mutableMapOf("value" to v)
+						}
+						parsed.putAll(map)
+					}
 					listOf(parsed)
 				}
 
 				BlockType.START -> {
+					val inputs = collectInputs(block, project)
 					val text = readCode(block).trim()
 					val current = block.outputsData.map { it.toMutableMap() }.toMutableList()
-					if (current.isEmpty()) {
-						val first = mutableMapOf<String, Any?>()
-						if (text.isNotBlank()) first["trigger"] = text
-						listOf(first)
+					val base = if (current.isEmpty()) {
+						mutableMapOf()
 					} else {
-						if (text.isNotBlank()) {
-							current[0]["trigger"] = text
-						}
-						current
+						current[0]
 					}
+					if (text.isNotBlank()) {
+						base["trigger"] = text
+					}
+					inputs.forEach { (k, v) ->
+						val map = when (v) {
+							is MutableMap<*, *> -> v as MutableMap<String, Any?>
+							is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
+							else -> mutableMapOf("value" to v)
+						}
+						base.putAll(map)
+					}
+
+					listOf(base)
 				}
 
 				BlockType.SUB_PROJECT -> {
