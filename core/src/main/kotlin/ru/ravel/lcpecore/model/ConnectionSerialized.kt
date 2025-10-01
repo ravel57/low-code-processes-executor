@@ -6,5 +6,7 @@ import java.util.UUID
 
 data class ConnectionSerialized @JsonCreator constructor(
 	@JsonProperty("fromId") val fromId: UUID,
-	@JsonProperty("toId") val toId: UUID
+	@JsonProperty("toId") val toId: UUID,
+	/*TODO delete*/ @JsonProperty("fromOutputIndex") val fromOutputIndex: Int,
+	/*TODO delete*/ @JsonProperty("toInputIndex") val toInputIndex: Int
 )

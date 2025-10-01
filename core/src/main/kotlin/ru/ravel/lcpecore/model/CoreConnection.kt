@@ -17,4 +17,10 @@ data class CoreConnection @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) const
 
 	@JsonProperty("toInputId")
 	val toInputId: UUID = UUID.randomUUID(),
+
+	@JsonProperty("fromOutputIndex")
+	/*TODO delete*/ val fromOutputIndex: Int? = null,
+
+	@JsonProperty("toInputIndex")
+	/*TODO delete*/ val toInputIndex: Int? = null,
 )

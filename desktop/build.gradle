@@ -1,7 +1,10 @@
 plugins {
+	id 'java'
 	id 'org.jetbrains.kotlin.jvm'
 	id 'application'
 	id 'org.openjfx.javafxplugin'
+	id 'org.javamodularity.moduleplugin'
+	id 'com.github.johnrengelman.shadow' version '8.1.1'
 }
 
 java {
@@ -46,3 +49,53 @@ dependencies {
 application {
 	mainClass = "ru.ravel.lcpedesktop.MainApp"
 }
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+	modularity.inferModulePath = true
+}
+
+tasks.named('compileKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
+	kotlinOptions.jvmTarget = '21'
+	destinationDirectory.set(
+		tasks.named('compileJava', JavaCompile).get().destinationDirectory
+	)
+}
+
+tasks.named('compileTestKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
+	kotlinOptions.jvmTarget = '21'
+	destinationDirectory.set(
+		tasks.named('compileTestJava', JavaCompile).get().destinationDirectory
+	)
+}
+
+jar {
+	enabled = false
+	from {
+		configurations.runtimeClasspath
+			.filter { it.name.endsWith(".jar") }
+			.collect { zipTree(it) }
+	}
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	manifest { attributes "Main-Class": "ru.ravel.testjavafx.MainApp" }
+}
+
+tasks.named('shadowJar') {
+	archiveClassifier.set('')
+	mergeServiceFiles()
+	manifest { attributes 'Main-Class': 'ru.ravel.lcpedesktop.MainApp' }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+	kotlinOptions {
+		jvmTarget = "21"
+	}
+}
+
+applicationDefaultJvmArgs = [
+		"--add-opens=kotlinx.coroutines.core/kotlinx.coroutines.debug.internal=ALL-UNNAMED",
+		"--add-modules", "javafx.controls,javafx.web",
+		"-Dkotlinx.coroutines.debug=on",
+		"-Dpolyglot.engine.WarnInterpreterOnly=false",
+]
