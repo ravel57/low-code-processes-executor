@@ -5,6 +5,7 @@ import ru.ravel.lcpecore.model.BlockType
 import ru.ravel.lcpecore.model.CoreBlock
 import ru.ravel.lcpecore.model.CoreProject
 import java.io.File
+import java.util.*
 
 class CoreSubProjectRunner(
 	private val projectRepo: ProjectRepository,
@@ -42,7 +43,7 @@ class CoreSubProjectRunner(
 		// 3) Входы внешнего SUB_PROJECT -> START/INPUT_DATA подпроекта (исправлено)
 		val incoming = outerProject.connections
 			.filter { it.toId == parentBlock.id }
-			.sortedBy { it.toInputIndex }
+			.sortedBy { parentBlock.indexOfInput(it.toInputId) }
 
 		val startBlocks = sub.blocks.filter { it.type == BlockType.START }
 		val inputDataBlank = sub.blocks.filter { it.type == BlockType.INPUT_DATA && (it.codePath.isNullOrBlank()) }
@@ -65,15 +66,16 @@ class CoreSubProjectRunner(
 		}
 
 		incoming.forEach { c ->
-			val src = outerProject.blocks.firstOrNull { it.id == c.fromId }
-			val value = asMutableMap(src?.outputsData?.getOrNull(c.fromOutputIndex))
-			val portName = parentBlock.inputNames.getOrNull(c.toInputIndex)
+			val portName = parentBlock.inputNames.getOrNull(parentBlock.indexOfInput(c.toInputId))
 			val target = when {
 				portName != null && byName.containsKey(portName) -> byName[portName]!!
-				else -> receivers.getOrNull(c.toInputIndex)
+				else -> receivers.getOrNull(parentBlock.indexOfInput(c.toInputId))
 			} ?: return@forEach
-			val outIndex = if (portName != null) target.outputNames.indexOf(portName).takeIf { it >= 0 } ?: 0 else c.toInputIndex
-			putOut(target, outIndex, value)
+			val outIndex = if (portName != null) {
+				target.outputNames.indexOf(portName).takeIf { it >= 0 } ?: 0
+			} else {
+				parentBlock.indexOfInput(c.toInputId)
+			}
 		}
 
 		// 4) Запуск подпроекта тем же ядром
@@ -94,14 +96,14 @@ class CoreSubProjectRunner(
 			val merged = mutableMapOf<String, Any?>()
 			sub.connections
 				.filter { it.toId == ex.id }
-				.sortedBy { it.toInputIndex }
+				.sortedBy { ex.indexOfInput(it.toInputId) }
 				.forEach { ic ->
 					val src = sub.blocks.firstOrNull { it.id == ic.fromId }
-					val mm = when (val v = src?.outputsData?.getOrNull(ic.fromOutputIndex)) {
-						is MutableMap<*, *> -> (v as MutableMap<String, Any?>).toMutableMap()
-						is Map<*, *>       -> (v as Map<String, Any?>).toMutableMap()
-						null               -> mutableMapOf()
-						else               -> mutableMapOf("value" to v)
+					val mm = when (val v = src?.outputsData?.getOrNull(src.indexOfOutput(ic.fromOutputId))) {
+						is MutableMap<*, *> -> v.toMutableMap() as MutableMap<String, Any?>
+						is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
+						null -> mutableMapOf()
+						else -> mutableMapOf("value" to v)
 					}
 					merged.putAll(mm)
 				}
@@ -113,4 +115,10 @@ class CoreSubProjectRunner(
 
 	private fun absolutize(base: File, p: String): String =
 		File(p).let { if (it.isAbsolute) it else File(base, p) }.absolutePath
+
+	private fun CoreBlock.indexOfInput(id: UUID): Int =
+		inputIds.indexOf(id).takeIf { it >= 0 } ?: 0
+
+	private fun CoreBlock.indexOfOutput(id: UUID): Int =
+		outputIds.indexOf(id).takeIf { it >= 0 } ?: 0
 }

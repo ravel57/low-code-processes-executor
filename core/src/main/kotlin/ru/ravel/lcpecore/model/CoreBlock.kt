@@ -1,12 +1,7 @@
 package ru.ravel.lcpecore.model
 
-import com.fasterxml.jackson.annotation.JsonAlias
-import com.fasterxml.jackson.annotation.JsonCreator
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.ObjectMapper
-import java.io.File
-import java.util.UUID
+import com.fasterxml.jackson.annotation.*
+import java.util.*
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class CoreBlock @JsonCreator constructor(
@@ -36,6 +31,12 @@ data class CoreBlock @JsonCreator constructor(
 	@JsonProperty("outputNames")
 	var outputNames: MutableList<String> = mutableListOf(),
 
+	@JsonProperty("inputIds")
+	var inputIds: MutableList<UUID> = mutableListOf(),
+
+	@JsonProperty("outputIds")
+	var outputIds: MutableList<UUID> = mutableListOf(),
+
 	var outputsData: MutableList<MutableMap<String, Any?>> = mutableListOf(),
 
 	@JsonProperty("packagesNames")
@@ -62,4 +63,25 @@ data class CoreBlock @JsonCreator constructor(
 	@JsonProperty("uiY")
 	@JsonAlias("y")
 	var uiY: Double? = null,
-)
+) {
+	@JsonIgnore
+	fun ensureIoIds() {
+		fun ensure(names: MutableList<String>, ids: MutableList<UUID>) {
+			while (ids.size < names.size) ids += UUID.randomUUID()
+			while (ids.size > names.size) ids.removeLast()
+
+			val seen = HashSet<UUID>()
+			for (i in ids.indices) {
+				if (!seen.add(ids[i])) {
+					ids[i] = UUID.randomUUID()
+				}
+			}
+		}
+		ensure(inputNames, inputIds)
+		ensure(outputNames, outputIds)
+	}
+
+	init {
+		ensureIoIds()
+	}
+}

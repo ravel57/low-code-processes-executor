@@ -14,6 +14,7 @@ import javafx.scene.Scene
 import javafx.scene.canvas.Canvas
 import javafx.scene.control.*
 import javafx.scene.input.KeyCode
+import javafx.scene.input.KeyEvent
 import javafx.scene.input.MouseButton
 import javafx.scene.input.MouseEvent
 import javafx.scene.layout.HBox
@@ -42,6 +43,7 @@ import ru.ravel.lcpecore.runtime.GroovyExecutor
 import ru.ravel.lcpecore.runtime.JsExecutor
 import ru.ravel.lcpecore.runtime.PythonExecutor
 import ru.ravel.lcpedesktop.model.Command
+import ru.ravel.lcpedesktop.model.DeleteBlockCommand
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -95,7 +97,7 @@ class MainApp : Application() {
 	// Временные поля для протягивания соединений
 	private var draggingLine: Line? = null
 	private var draggingFromBlock: BlockNode? = null
-	private var draggingFromOutputIndex: Int? = null
+	private var draggingFromOutputId: UUID? = null
 
 //	@Volatile
 //	private var isRunning = false
@@ -454,21 +456,44 @@ class MainApp : Application() {
 		val scene = Scene(root, windowW, windowH)
 
 		// Горячие клавиши
-		scene.setOnKeyPressed { e ->
-			if (e.code in arrayOf(KeyCode.DELETE, KeyCode.BACK_SPACE)) {
-				selectedBlock?.let { deleteBlockRequest(it) }
-				selectedConnection?.let { conn ->
-					connections.remove(conn)
-					conn.from.connectedLines.remove(conn)
-					conn.to.connectedLines.remove(conn)
-					(conn.line.parent as? Pane)?.children?.remove(conn.line)
-					selectedConnection = null
-					markDirty()
+		scene.addEventHandler(KeyEvent.KEY_PRESSED) { e ->
+			when {
+				e.code == KeyCode.DELETE || e.code == KeyCode.BACK_SPACE -> {
+					val selectedConnections = connections.filter { it.selected }.toList()
+					if (selectedConnections.isNotEmpty()) {
+						selectedConnections.forEach { removeConnection(it) }
+						markDirty()
+						e.consume()
+						return@addEventHandler
+					}
+					val selectedBlocks = blocks.filter { it.selected }.toList()
+					if (selectedBlocks.isNotEmpty()) {
+						selectedBlocks.forEach { runCommand(DeleteBlockCommand(this, it)) }
+						markDirty()
+						e.consume()
+						return@addEventHandler
+					}
 				}
-			}
-			if (e.isControlDown && e.code == KeyCode.S) {
-				saveBtn.fire()
-				e.consume()
+				e.isControlDown && e.code == KeyCode.S -> {
+					saveBtn.fire()
+					e.consume()
+				}
+				e.isControlDown && e.code == KeyCode.Z && !e.isShiftDown -> {
+					undoStack.poll()?.let {
+						it.undo()
+						redoStack.push(it)
+						markDirty()
+					}
+					e.consume()
+				}
+				e.isControlDown && e.isShiftDown && e.code == KeyCode.Z -> {
+					redoStack.poll()?.let {
+						it.execute()
+						undoStack.push(it)
+						markDirty()
+					}
+					e.consume()
+				}
 			}
 		}
 
@@ -692,10 +717,16 @@ class MainApp : Application() {
 	}
 
 	private fun selectConnection(conn: Connection?) {
-		connections.forEach { it.selected = false }
+		connections.forEach {
+			it.selected = false
+			it.line.stroke = Color.BLUE
+		}
 		blocks.forEach { it.selected = false }
 		selectedConnection = conn
-		conn?.selected = true
+		conn?.let {
+			it.selected = true
+			it.line.stroke = Color.RED
+		}
 		selectedBlock = null
 	}
 
@@ -719,7 +750,6 @@ class MainApp : Application() {
 			var pressedSceneY = 0.0
 			var draggingStarted = false
 			val dragThreshold = 6.0
-
 			outCircle.onMousePressed = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY) {
 					pressedSceneX = event.sceneX
@@ -733,90 +763,96 @@ class MainApp : Application() {
 					val dx = event.sceneX - pressedSceneX
 					val dy = event.sceneY - pressedSceneY
 					if (!draggingStarted && (dx * dx + dy * dy) > dragThreshold * dragThreshold) {
-						// запускаем протяжку только при реальном драгe
-						val (sx, sy) = block.outputPoint(outputIdx)
-						val line = Line(sx, sy, sx, sy).apply {
+						val outId = block.core.outputIds[outputIdx]
+						val sc = outCircle.localToScene(outCircle.centerX, outCircle.centerY)
+						val pc = contentPane.sceneToLocal(sc.x, sc.y)
+						val tmp = Line(pc.x, pc.y, pc.x, pc.y).apply {
 							stroke = Color.BLUE
 							strokeWidth = 2.0
 							viewOrder = 1.0
 						}
-						contentPane.children.add(line)
-						draggingLine = line
+						contentPane.children.add(tmp)
+						draggingLine = tmp
 						draggingFromBlock = block
-						draggingFromOutputIndex = outputIdx
+						draggingFromOutputId = outId
 						draggingStarted = true
 					}
 					if (draggingStarted) {
 						val p = contentPane.sceneToLocal(event.sceneX, event.sceneY)
-						draggingLine?.apply {
-							endX = p.x
-							endY = p.y
-						}
+						draggingLine?.endX = p.x
+						draggingLine?.endY = p.y
 					}
 					event.consume()
 				}
 			}
 			outCircle.onMouseReleased = EventHandler { event ->
 				if (event.button == MouseButton.PRIMARY) {
-					if (!draggingStarted) {
-						// это клик — показываем результаты конкретного выхода
-						showOutputFor(block, outputIdx)
-					} else {
-						// завершение протяжки (оставляем как в вашем коде)
-						val paneCoords = contentPane.sceneToLocal(event.sceneX, event.sceneY)
-						val toBlockPair = blocks.asSequence().flatMap { other ->
-							other.inputCircles.mapIndexed { idx, circle -> Triple(other, circle, idx) }
-						}.find { (other, circle, _) ->
-							if (other == draggingFromBlock) return@find false
-							val sp = circle.localToScene(circle.centerX, circle.centerY)
-							val pp = contentPane.sceneToLocal(sp.x, sp.y) ?: return@find false
-							val dx = pp.x - paneCoords.x
+					if (!draggingStarted) return@EventHandler
 
-							val dy = pp.y - paneCoords.y
-							Math.hypot(dx, dy) <= circle.radius + 4
-						}
-						if (toBlockPair != null) {
-							val (toBlock, _, inputIdx) = toBlockPair
-							val (sx, sy) = draggingFromBlock!!.outputPoint(draggingFromOutputIndex!!)
-							val (ex, ey) = toBlock.inputPoint(inputIdx)
-							val visible = draggingLine!!.apply {
-								startX = sx
-								startY = sy
-								endX = ex
-								endY = ey
-							}
-							val conn = Connection(draggingFromBlock!!, toBlock, visible, draggingFromOutputIndex!!, inputIdx)
-
-							val pick = Line().apply {
-								stroke = Color.TRANSPARENT
-								strokeWidth = 12.0
-								isPickOnBounds = false
-								viewOrder = 0.9
-								startXProperty().bind(visible.startXProperty())
-								startYProperty().bind(visible.startYProperty())
-								endXProperty().bind(visible.endXProperty())
-								endYProperty().bind(visible.endYProperty())
-								onMouseClicked = EventHandler { ev ->
-									if (ev.button == MouseButton.PRIMARY) {
-										selectConnection(conn)
-										(parent as? Pane)?.requestFocus()
-										ev.consume()
-									}
-								}
-							}
-							(scrollPane.content as? Pane)?.children?.add(pick)
-							pick.toFront()
-							visible.toFront()
-							connections.add(conn)
-							draggingFromBlock!!.connectedLines.add(conn)
-							toBlock.connectedLines.add(conn)
-							markDirty()
-						} else {
-							contentPane.children.remove(draggingLine)
-						}
-						draggingLine = null
-						draggingFromOutputIndex = null
+					val panePt = contentPane.sceneToLocal(event.sceneX, event.sceneY)
+					// ищем вход, над которым отпустили
+					val hit = blocks.asSequence().flatMap { other ->
+						other.inputCircles.mapIndexed { i, c -> Triple(other, i, c) }
+					}.firstOrNull { (other, i, c) ->
+						if (other == draggingFromBlock) return@firstOrNull false
+						val sc = c.localToScene(c.centerX, c.centerY)
+						val pc = contentPane.sceneToLocal(sc.x, sc.y)
+						val dx = pc.x - panePt.x
+						val dy = pc.y - panePt.y
+						Math.hypot(dx, dy) <= c.radius + 4
 					}
+
+					if (hit != null) {
+						val (toBlock, inputIdx, _) = hit
+						val fromCenter = outCircle.localToScene(outCircle.centerX, outCircle.centerY)
+						val fromPoint = contentPane.sceneToLocal(fromCenter.x, fromCenter.y)
+						val toCircle = toBlock.inputCircles[inputIdx]
+						val toCenter = toCircle.localToScene(toCircle.centerX, toCircle.centerY)
+						val toPoint = contentPane.sceneToLocal(toCenter.x, toCenter.y)
+						val visible = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
+							stroke = Color.BLUE
+							strokeWidth = 2.0
+						}
+						val pick = Line().apply {
+							stroke = Color.TRANSPARENT
+							strokeWidth = 12.0
+							isPickOnBounds = false
+							viewOrder = 0.9
+						}
+						val conn = Connection(
+							from = draggingFromBlock!!,
+							to = toBlock,
+							line = visible,
+							pick = pick,
+							fromPort = draggingFromOutputId!!,                         // ← важно
+							toPort = toBlock.core.inputIds[inputIdx]
+						)
+						conn.updateLine()
+						connections.add(conn)
+						if (visible.parent == null) contentPane.children.add(visible)
+						if (pick.parent == null) contentPane.children.add(pick)
+
+						pick.onMouseClicked = EventHandler { e ->
+							if (e.button == MouseButton.PRIMARY) {
+								selectConnection(conn); (pick.parent as? Pane)?.requestFocus(); e.consume()
+							}
+						}
+
+						draggingFromBlock!!.layoutXProperty().addListener { _, _, _ -> conn.updateLine() }
+						draggingFromBlock!!.layoutYProperty().addListener { _, _, _ -> conn.updateLine() }
+						toBlock.layoutXProperty().addListener { _, _, _ -> conn.updateLine() }
+						toBlock.layoutYProperty().addListener { _, _, _ -> conn.updateLine() }
+
+						contentPane.children.remove(draggingLine)
+						draggingFromBlock!!.connectedLines.add(conn)
+						toBlock.connectedLines.add(conn)
+						markDirty()
+					} else {
+						contentPane.children.remove(draggingLine)
+					}
+
+					draggingLine = null
+					draggingFromOutputId = null
 					event.consume()
 				}
 			}
@@ -1009,28 +1045,40 @@ class MainApp : Application() {
 			project.connections.forEach { c ->
 				val from = idToUi[c.fromId] ?: return@forEach
 				val to = idToUi[c.toId] ?: return@forEach
-				val (sx, sy) = from.outputPoint(c.fromOutputIndex)
-				val (ex, ey) = to.inputPoint(c.toInputIndex)
-				val visible = Line(sx, sy, ex, ey).apply {
+				val fromIdx = from.core.outputIds.indexOf(c.fromOutputId)
+				val toIdx = to.core.inputIds.indexOf(c.toInputId)
+				val fromCircle = from.outputCircles.getOrNull(fromIdx)
+				val toCircle = to.inputCircles.getOrNull(toIdx)
+				if (fromCircle == null || toCircle == null) {
+					println("⚠️ Пропущена связь: не найден кружок для соединения ${c.fromOutputId} -> ${c.toInputId}")
+					return@forEach
+				}
+				val fromCenter = fromCircle.localToScene(fromCircle.centerX, fromCircle.centerY)
+				val fromPoint = contentPane.sceneToLocal(fromCenter.x, fromCenter.y)
+				val toCenter = toCircle.localToScene(toCircle.centerX, toCircle.centerY)
+				val toPoint = contentPane.sceneToLocal(toCenter.x, toCenter.y)
+				val visible = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
 					stroke = Color.BLUE
 					strokeWidth = 2.0
 				}
-				val conn = Connection(from, to, visible, c.fromOutputIndex, c.toInputIndex)
-				val pick = Line().apply {
+				val pick = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
 					stroke = Color.TRANSPARENT
 					strokeWidth = 12.0
 					isPickOnBounds = false
-					viewOrder = 0.9
-					startXProperty().bind(visible.startXProperty())
-					startYProperty().bind(visible.startYProperty())
-					endXProperty().bind(visible.endXProperty())
-					endYProperty().bind(visible.endYProperty())
-					onMouseClicked = EventHandler { ev ->
-						if (ev.button == MouseButton.PRIMARY) {
-							selectConnection(conn)
-							(parent as? Pane)?.requestFocus()
-							ev.consume()
-						}
+				}
+				val conn = Connection(from, to, visible, c.toInputId, c.fromOutputId, pick)
+				connections.add(conn)
+				if (visible.parent == null) {
+					contentPane.children.add(visible)
+				}
+				if (pick.parent == null) {
+					contentPane.children.add(pick)
+				}
+				pick.onMouseClicked = EventHandler { ev ->
+					if (ev.button == MouseButton.PRIMARY) {
+						selectConnection(conn)
+						(pick.parent as? Pane)?.requestFocus()
+						ev.consume()
 					}
 				}
 				(scrollPane.content as? Pane)?.children?.addAll(pick, visible)
@@ -1234,10 +1282,19 @@ class MainApp : Application() {
 	}
 
 	/** Совместимость со старым кодом (раньше вызывалось после importBlocksFromFile). */
-	fun importOutputsData(file: File) {
+	private fun importOutputsData(file: File) {
 		val project = collectCoreProject()
 		outputsRepo.loadLast(file, project)
 		applyOutputsToUi(project)
+	}
+
+
+	private fun removeConnection(conn: Connection) {
+		connections.remove(conn)
+		conn.from.connectedLines.remove(conn)
+		conn.to.connectedLines.remove(conn)
+		(conn.line.parent as? Pane)?.children?.remove(conn.line)
+		(conn.pick.parent as? Pane)?.children?.remove(conn.pick)
 	}
 
 

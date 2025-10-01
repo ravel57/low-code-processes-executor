@@ -29,6 +29,11 @@ import ru.ravel.lcpecore.model.InputFormatType
 import java.io.File
 import kotlin.math.roundToInt
 import com.fasterxml.jackson.databind.ObjectMapper
+import javafx.collections.FXCollections
+import javafx.scene.input.ClipboardContent
+import javafx.scene.input.TransferMode
+import javafx.util.Callback
+import java.util.*
 
 
 class BlockNode(
@@ -422,22 +427,48 @@ class BlockNode(
 
 				// если есть «I/O» — забираем поля
 				tabs?.tabs?.firstOrNull { it.text == "I/O" }?.let { ioTab ->
-					val vbox = ioTab.content as VBox
-					val inputsBox = (vbox.children[0] as VBox)
-					val outputsBox = (vbox.children[1] as VBox)
-					val inRows = (inputsBox.children[1] as ScrollPane).content as VBox
-					core.inputNames = inRows.children.mapIndexed { idx, row ->
-						((row as HBox).children[0] as TextField).text.ifBlank { "in$idx" }
-					}.toMutableList()
-					core.inputCount = core.inputNames.size
-
+					val ioRoot = ioTab.content as VBox
+					val inputsBox = ioRoot.children[0] as VBox
+					val inputsListView = inputsBox.children.filterIsInstance<ListView<IOItem>>().first()
+					val newInputNames = mutableListOf<String>()
+					val newInputIds = mutableListOf<UUID>()
+					inputsListView.items.forEachIndexed { idx, item ->
+						val base = item.name.ifBlank { "in$idx" }
+						newInputNames += base
+						newInputIds += item.id
+					}
+					val normalized = run {
+						val tmpCore = core.copy() // если метода copy нет, просто используем функцию ниже на списке
+						tmpCore.inputNames = newInputNames.toMutableList()
+						tmpCore.inputCount = newInputNames.size
+						// используем тот же алгоритм, что в UI
+						val fix = mutableListOf<String>()
+						val seen = mutableSetOf<String>()
+						for (i in newInputNames.indices) {
+							var n = newInputNames[i].ifBlank { "in$i" }
+							if (!seen.add(n)) {
+								var k = 2
+								var c: String
+								do {
+									c = "${n}_$k"; k++
+								} while (!seen.add(c))
+								n = c
+							}
+							fix += n
+						}
+						fix
+					}
+					core.inputNames = normalized
+					core.inputIds = newInputIds
+					core.inputCount = normalized.size
+					val outputsBox = ioRoot.children[1] as VBox
 					val outRows = (outputsBox.children[1] as ScrollPane).content as VBox
 					core.outputNames = outRows.children.mapIndexed { idx, row ->
 						((row as HBox).children[0] as TextField).text.ifBlank { "out$idx" }
 					}.toMutableList()
+					core.ensureIoIds()
 					core.outputCount = core.outputNames.size
 				}
-
 				if (core.type == BlockType.MAPPING_PYTHON) {
 					tabs?.tabs?.firstOrNull { it.text == "pip" }?.let { pipTab ->
 						val vbox = pipTab.content as VBox
@@ -504,23 +535,94 @@ class BlockNode(
 
 
 	private fun buildEditableInputsBox(): VBox {
-		val rows = VBox(4.0)
-		val scroll =
-			ScrollPane(rows).apply { prefHeight = 180.0; isFitToWidth = true; vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS }
-		core.inputNames.forEach { addInputRow(rows, it) }
-		if (rows.children.isEmpty()) addInputRow(rows)
-		val addBtn = Button("+").apply { setOnAction { addInputRow(rows) } }
-		return VBox(4.0, HBox(6.0, Label("Входы:"), addBtn), scroll)
+		core.ensureIoIds()
+		val names = normalizeInputNames()
+		core.inputNames = names
+
+		val items = FXCollections.observableArrayList<IOItem>().apply {
+			names.forEachIndexed { i, nm ->
+				val id = core.inputIds.getOrNull(i) ?: UUID.randomUUID()
+				if (i >= core.inputIds.size) {
+					core.inputIds += id
+				}
+				add(IOItem(nm, id))
+			}
+			if (isEmpty()) {
+				add(IOItem("in0", UUID.randomUUID()))
+			}
+		}
+		val listView = ListView(items).apply {
+			prefHeight = 200.0
+			cellFactory = Callback {
+				object : ListCell<IOItem>() {
+					private val nameField = TextField()
+					private val delBtn = Button("–")
+					private val row = HBox(6.0, nameField, delBtn).apply {
+						alignment = Pos.CENTER_LEFT
+					}
+
+					init {
+						nameField.textProperty().addListener { _, _, v ->
+							item?.name = v
+						}
+						delBtn.setOnAction {
+							item?.let { ci ->
+								listView.items.remove(ci)
+							}
+						}
+						setOnDragDetected { e ->
+							if (item == null) return@setOnDragDetected
+							val db = startDragAndDrop(TransferMode.MOVE)
+							val cc = ClipboardContent().apply {
+								putString(index.toString())
+							}
+							db.setContent(cc)
+							e.consume()
+						}
+						setOnDragOver { e ->
+							if (e.gestureSource != this && e.dragboard.hasString()) {
+								e.acceptTransferModes(*TransferMode.COPY_OR_MOVE)
+							}
+							e.consume()
+						}
+						setOnDragDropped { e ->
+							val db = e.dragboard
+							if (db.hasString()) {
+								val from = db.string.toInt()
+								val dragged = listView.items.removeAt(from)
+								val to = if (index < 0) listView.items.size else index
+								listView.items.add(to, dragged)
+								e.isDropCompleted = true
+								listView.selectionModel.select(to)
+							}
+							e.consume()
+						}
+					}
+
+					override fun updateItem(value: IOItem?, empty: Boolean) {
+						super.updateItem(value, empty)
+						if (empty || value == null) {
+							text = null
+							graphic = null
+						} else {
+							if (nameField.text != value.name) {
+								nameField.text = value.name
+							}
+							graphic = row
+						}
+					}
+				}
+			}
+		}
+		val addBtn = Button("+").apply {
+			setOnAction {
+				listView.items.add(IOItem("in${listView.items.size}", UUID.randomUUID()))
+			}
+		}
+		val header = HBox(8.0, Label("Входы:"), addBtn).apply { alignment = Pos.CENTER_LEFT }
+		return VBox(6.0, header, listView)
 	}
 
-	private fun addInputRow(container: VBox, initial: String = "") {
-		val tf = TextField(initial.ifBlank { "in${container.children.size}" })
-		lateinit var row: HBox
-		row = HBox(6.0, tf, Button("–").apply {
-			setOnAction { if (container.children.size > 1) container.children.remove(row) }
-		}).apply { alignment = Pos.CENTER_LEFT }
-		container.children += row
-	}
 
 	private fun buildEditableOutputsBox(): VBox {
 		val rows = VBox(4.0)
@@ -545,17 +647,12 @@ class BlockNode(
 		children.removeAll(inputCircles); children.removeAll(outputCircles)
 		inputCircles.clear(); outputCircles.clear()
 		createIOCircles()
-
-		// отдать контейнеру список связей, ставших недействительными
-		val invalid = connectedLines.filter {
-			it.from == this && it.fromPort >= outputCircles.size ||
-					it.to == this && it.toPort >= inputCircles.size
+		val invalid: List<Connection> = connectedLines.filter { conn ->
+			(conn.from == this && core.outputIds.none { it == conn.fromPort }) || (conn.to == this && core.inputIds.none { it == conn.toPort })
 		}
 		callbacks.onInvalidConnections(invalid)
 		connectedLines.removeAll(invalid)
-
 		updateConnectedLines()
-
 		// переназначить обработчики на новых кружках
 		rebuildCirclesHandlers { outIndex, outCircle ->
 			outCircle.onMousePressed = EventHandler { e ->
@@ -574,6 +671,14 @@ class BlockNode(
 				}
 			}
 		}
+		inputCircles.forEachIndexed { idx, c ->
+			val nm = core.inputNames.getOrNull(idx) ?: "in$idx"
+			Tooltip.install(c, Tooltip(nm))
+		}
+		outputCircles.forEachIndexed { idx, c ->
+			val nm = core.outputNames.getOrNull(idx) ?: "out$idx"
+			Tooltip.install(c, Tooltip(nm))
+		}
 	}
 
 	private fun createIOCircles() {
@@ -584,8 +689,11 @@ class BlockNode(
 			val step = newHeight / (core.inputCount + 1)
 			repeat(core.inputCount) { i ->
 				val c = Circle(0.0, step * (i + 1), 7.0, Color.LIGHTSKYBLUE).apply {
-					stroke = Color.DARKBLUE; strokeWidth = 1.6
-					Tooltip.install(this, Tooltip(core.inputNames.getOrNull(i) ?: "in$i"))
+					stroke = Color.DARKBLUE
+					strokeWidth = 1.6
+					val inputName = core.inputNames.getOrNull(i) ?: "in$i"
+					Tooltip.install(this, Tooltip(inputName))
+					properties["portId"] = core.inputIds[i]
 				}
 				inputCircles += c; children += c
 			}
@@ -609,25 +717,29 @@ class BlockNode(
 		}
 	}
 
-	fun inputPoint(index: Int = 0): Pair<Double, Double> {
-		val circle = inputCircles.getOrNull(index) ?: inputCircles.firstOrNull()
-		return if (circle != null) layoutX + circle.centerX to layoutY + circle.centerY
-		else layoutX to (layoutY + height / 2)
+	// Точка входа по UUID
+	fun inputPoint(id: UUID): Pair<Double, Double> {
+		val idx = core.inputIds.indexOf(id)
+		val circle = if (idx >= 0) inputCircles.getOrNull(idx) else null
+		return if (circle != null)
+			(layoutX + circle.centerX) to (layoutY + circle.centerY)
+		else
+			layoutX to (layoutY + height / 2)
 	}
 
-	fun outputPoint(index: Int = 0): Pair<Double, Double> {
-		val circle = outputCircles.getOrNull(index) ?: outputCircles.firstOrNull()
-		return if (circle != null) layoutX + circle.centerX to layoutY + circle.centerY
-		else (layoutX + width) to (layoutY + height / 2)
+	// Точка выхода по UUID
+	fun outputPoint(id: UUID): Pair<Double, Double> {
+		val idx = core.outputIds.indexOf(id)
+		val circle = if (idx >= 0) outputCircles.getOrNull(idx) else null
+		return if (circle != null)
+			(layoutX + circle.centerX) to (layoutY + circle.centerY)
+		else
+			(layoutX + width) to (layoutY + height / 2)
 	}
 
 	fun updateConnectedLines() {
 		connectedLines.forEach { conn ->
 			conn.updateLine()
-			val (sx, sy) = conn.from.outputPoint(conn.fromPort)
-			val (ex, ey) = conn.to.inputPoint(conn.toPort)
-			conn.line.startX = sx; conn.line.startY = sy
-			conn.line.endX = ex; conn.line.endY = ey
 		}
 	}
 
@@ -646,5 +758,45 @@ class BlockNode(
 		layoutX = (layoutX / gridSize).roundToInt() * gridSize
 		layoutY = (layoutY / gridSize).roundToInt() * gridSize
 	}
+
+
+	private fun normalizeInputNames(): MutableList<String> {
+		val count = core.inputCount
+
+		// Берём текущие имена по индексам; пустые пока оставляем пустыми
+		val names = MutableList(count) { i ->
+			core.inputNames.getOrNull(i)?.trim().orEmpty()
+		}
+
+		val autoLike = Regex("""^in\d+$""")
+		val nonBlank = names.filter { it.isNotBlank() }
+		val hasDup = nonBlank.size != nonBlank.toSet().size
+		val allAutoLikeOrBlank = names.all { it.isBlank() || autoLike.matches(it) }
+
+		// Если все имена «технические» (in\d+) ИЛИ есть дубликаты — жёстко перенумеровываем
+		if (allAutoLikeOrBlank || hasDup) {
+			return MutableList(count) { i -> "in$i" }
+		}
+
+		// Иначе: заполняем пропуски и уникализируем пользовательские
+		val seen = mutableSetOf<String>()
+		for (i in names.indices) {
+			var n = names[i].ifBlank { "in$i" }
+			if (!seen.add(n)) {
+				var k = 2
+				var c: String
+				do {
+					c = "${n}_$k"
+					k++
+				} while (!seen.add(c))
+				n = c
+			}
+			names[i] = n
+		}
+		return names
+	}
+
+
+	private data class IOItem(var name: String, val id: UUID)
 
 }

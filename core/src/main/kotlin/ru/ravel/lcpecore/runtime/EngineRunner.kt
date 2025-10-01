@@ -259,11 +259,20 @@ class EngineRunner(
 		val inputs = mutableMapOf<String, Any?>()
 		project.connections
 			.filter { it.toId == block.id }
-			.sortedBy { it.toInputIndex }
 			.forEach { conn ->
 				val fromBlock = project.blocks.firstOrNull { it.id == conn.fromId }
-				val value = fromBlock?.outputsData?.getOrNull(conn.fromOutputIndex) ?: mutableMapOf<String, Any?>()
-				val portName = block.inputNames.getOrNull(conn.toInputIndex) ?: "in${conn.toInputIndex}"
+				val fromOutIdx = fromBlock?.outputIds?.indexOf(conn.fromOutputId) ?: -1
+				val value = if (fromOutIdx >= 0) {
+					fromBlock?.outputsData?.getOrNull(fromOutIdx) ?: mutableMapOf()
+				} else {
+					mutableMapOf()
+				}
+				val toInIdx = block.inputIds.indexOf(conn.toInputId)
+				val portName = if (toInIdx >= 0) {
+					block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx"
+				} else {
+					"in?"
+				}
 				inputs[portName] = value
 			}
 		return inputs
