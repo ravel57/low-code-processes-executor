@@ -14,7 +14,7 @@ object DexCompiler {
 	fun jarToDexJar(
 		inputJar: File,
 		outputDexJar: File,
-		runtimeJar: File = File("libs/groovy/groovy-4.0.28.jar"),
+		groovyLibsDir: File = File("libs/groovy"),
 		minApi: Int = 26,
 	) {
 		val androidHome = System.getenv("ANDROID_HOME")!!
@@ -35,35 +35,41 @@ object DexCompiler {
 		val combinedJar = createTempFile(prefix = "combined-", suffix = ".jar")
 		JarOutputStream(FileOutputStream(combinedJar)).use { jos ->
 			val services = mutableMapOf<String, MutableList<String>>()
+			val addedEntries = mutableSetOf<String>()
 
-			fun addJar(jar: File) {
-				JarFile(jar).use { jf ->
-					for (entry in jf.entries()) {
-						if (entry.isDirectory) {
+			fun addJar(inputJar: File, jos: JarOutputStream) {
+				JarFile(inputJar).use { jar ->
+					val entries = jar.entries()
+					while (entries.hasMoreElements()) {
+						val entry = entries.nextElement()
+						val name = entry.name
+						if (name.equals("META-INF/MANIFEST.MF", ignoreCase = true)) continue
+						if (name.startsWith("META-INF/")) {
 							continue
 						}
-						if (entry.name.startsWith("META-INF/services/")) {
+						if (addedEntries.contains(name)) {
 							continue
 						}
-						val bytes = jf.getInputStream(entry).readBytes()
-						jos.putNextEntry(JarEntry(entry.name))
-						jos.write(bytes)
+						addedEntries.add(name)
+						val newEntry = JarEntry(name)
+						jos.putNextEntry(newEntry)
+						jar.getInputStream(entry).use { it.copyTo(jos) }
 						jos.closeEntry()
 					}
 				}
 			}
-			addJar(runtimeJar)
-			addJar(inputJar)
-			// записываем объединённые services
+			require(groovyLibsDir.exists()) { "Нет папки с groovy runtime: $groovyLibsDir" }
+			groovyLibsDir.listFiles { f -> f.extension == "jar" }?.forEach { jar ->
+				println("Добавляю в fat-jar: ${jar.name}")
+				addJar(jar, jos)
+			}
+			addJar(inputJar, jos)
 			for ((name, lines) in services) {
 				jos.putNextEntry(JarEntry(name))
 				jos.write(lines.joinToString("\n").toByteArray())
 				jos.closeEntry()
 			}
-
-			// Хардкодим META-INF/services/VMPluginFactory
 			jos.putNextEntry(JarEntry("META-INF/services/org.codehaus.groovy.vmplugin.VMPluginFactory"))
-			// для Android Java 8/9 плагин
 			val plugin = "org.codehaus.groovy.vmplugin.v9.Java9\n"
 			jos.write(plugin.toByteArray(Charsets.UTF_8))
 			jos.closeEntry()
@@ -82,8 +88,8 @@ object DexCompiler {
 			"--release",
 			"--output", outDexDir.absolutePath,
 			"--lib", androidJar.absolutePath,
-			runtimeJar.absolutePath,
-			inputJar.absolutePath
+			combinedJar.absolutePath,
+//			inputJar.absolutePath
 		)
 
 		val pb = ProcessBuilder(args).redirectErrorStream(true)

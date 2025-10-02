@@ -45,6 +45,7 @@ import ru.ravel.lcpecore.runtime.JsExecutor
 import ru.ravel.lcpecore.runtime.PythonExecutor
 import ru.ravel.lcpedesktop.android.DexCompiler
 import ru.ravel.lcpedesktop.android.GroovyJarCompiler
+import ru.ravel.lcpedesktop.model.BlockLoc
 import ru.ravel.lcpedesktop.model.Command
 import ru.ravel.lcpedesktop.model.DeleteBlockCommand
 import java.io.File
@@ -180,7 +181,7 @@ class MainApp : Application() {
 
 	override fun init() {
 		groovy = object : GroovyExecutor {
-			override fun exec(code: String, bindings: Map<String, Any?>): Any? {
+			override fun exec(code: String, bindings: Map<String, Any?>, groovyClassName: String?): Any? {
 				val binding = Binding(bindings.toMutableMap())
 				val shell = GroovyShell(binding)
 				val result = shell.evaluate(code)
@@ -458,21 +459,29 @@ class MainApp : Application() {
 					deleteRecursively()
 					mkdirs()
 				}
-				val tmpJars = mutableListOf<File>()
-				collectAllBlocks(currentProjectFile ?: return@setOnAction)
-					.filter { it.type == BlockType.MAPPING_GROOVY }
-					.forEachIndexed { idx, block ->
-						val code = block.codePath?.let { File(it).takeIf { f -> f.exists() }?.readText() }
-							?: return@forEachIndexed
-						val className = "GroovyBlock_${idx}_${block.id.toString().replace("-", "")}"
-						val jarFile = File(outputDir, "$className.jar")
-						GroovyJarCompiler.compileToJar(code, className, jarFile, block.inputNames, block.outputNames)
-						tmpJars.add(jarFile)
+				val all = collectAllBlocksWithFile(currentProjectFile ?: return@setOnAction)
+				val groovyBlocks = all.filter { it.block.type == BlockType.MAPPING_GROOVY }
+				groovyBlocks.forEach { (ownerFile, coreBlock) ->
+					val code = coreBlock.codeAbsolutePath?.takeIf { it.exists() }?.readText() ?: return@forEach
+					GroovyJarCompiler.compileToJar(
+						script = code,
+						block = coreBlock,
+						outputDir = outputDir,
+					)
+				}
+				all.groupBy { it.file }.forEach { (file, list) ->
+					val proj = projectRepo.loadProject(file).apply { baseDir = file.parentFile }
+					val byId = proj.blocks.associateBy { it.id }
+					list.forEach { loc ->
+						byId[loc.block.id]?.groovyClassName = loc.block.groovyClassName
 					}
+					projectRepo.saveProject(file, proj)
+				}
 				val mergedJar = File(outputDir, "all-blocks.jar")
 				val dexFile = File(outputDir, "groovy-blocks-dex.jar")
 				DexCompiler.mergeAllBlockJars(mergedJar, outputDir)
 				DexCompiler.jarToDexJar(mergedJar, dexFile)
+				currentProjectFile?.let { projectRepo.saveProject(it, collectCoreProject()) }
 				Alert(Alert.AlertType.INFORMATION).apply {
 					title = "Сборка завершена"
 					headerText = "Файл dex создан"
@@ -1199,8 +1208,9 @@ class MainApp : Application() {
 		return when (alert.showAndWait().orElse(cancel)) {
 			save -> {
 				val project = collectCoreProject()
-				if (currentProjectFile != null) projectRepo.saveProject(currentProjectFile!!, project)
-				else {
+				if (currentProjectFile != null) {
+					projectRepo.saveProject(currentProjectFile!!, project)
+				} else {
 					val fc = FileChooser().apply {
 						title = "Сохранить проект"
 						extensionFilters += FileChooser.ExtensionFilter("JSON Files", "*.json")
@@ -1406,25 +1416,30 @@ class MainApp : Application() {
 	}
 
 
-	private fun collectAllBlocks(projectFile: File, visited: MutableSet<String> = mutableSetOf()): List<CoreBlock> {
-		if (!projectFile.exists()) {
-			return emptyList()
+	private fun collectAllBlocksWithFile(
+		projectFile: File,
+		visited: MutableSet<String> = mutableSetOf(),
+	): List<BlockLoc> {
+		if (!projectFile.exists()) return emptyList()
+		if (!visited.add(projectFile.absolutePath)) return emptyList()
+
+		val project = projectRepo.loadProject(projectFile).apply { baseDir = projectFile.parentFile }
+		val thisFile = projectFile
+		val acc = mutableListOf<BlockLoc>()
+
+		project.blocks.forEach { b ->
+			b.codeAbsolutePath = b.codePath?.let { File(projectFile.parent, it) }
+			acc.add(BlockLoc(thisFile, b))
 		}
-		if (!visited.add(projectFile.absolutePath)) {
-			return emptyList()
-		}
-		val project = projectRepo.loadProject(projectFile)
-		val allBlocks = mutableListOf<CoreBlock>()
-		allBlocks.addAll(project.blocks)
-		project.blocks.forEach { block ->
-			if (block.subProjectPath.isNotBlank()) {
-				val subFile = resolveProjectFile(block.subProjectPath)
+		project.blocks.forEach { b ->
+			if (b.subProjectPath.isNotBlank()) {
+				val subFile = File(projectFile.parentFile, b.subProjectPath).normalize()
 				if (subFile.exists()) {
-					allBlocks.addAll(collectAllBlocks(subFile, visited))
+					acc += collectAllBlocksWithFile(subFile, visited)
 				}
 			}
 		}
-		return allBlocks
+		return acc
 	}
 
 

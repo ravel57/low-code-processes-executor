@@ -2,6 +2,7 @@ package ru.ravel.lcpedesktop.android
 
 import groovy.lang.GroovyClassLoader
 import org.codehaus.groovy.control.CompilerConfiguration
+import ru.ravel.lcpecore.model.CoreBlock
 import java.io.File
 import java.io.FileOutputStream
 import java.util.jar.JarEntry
@@ -11,13 +12,16 @@ object GroovyJarCompiler {
 
 	/**
 	 * Компилирует groovy-скрипт в JAR.
-	 *
-	 * @param script полный текст скрипта (с импортами и любым кодом)
-	 * @param className имя генерируемого класса
-	 * @param outputJarFile jar-файл для записи
 	 */
-	fun compileToJar(script: String, className: String, outputJarFile: File, inputs: List<String>, outputs: List<String>) {
-		val groovySource = wrapGroovySource(className, script, inputs, outputs)
+	fun compileToJar(script: String, block: CoreBlock, outputDir: File): File {
+		val fqcn = block.groovyClassName?.takeIf { it.isNotBlank() }
+			?: "ru.ravel.scripts.GroovyBlock_${block.id.toString().replace("-", "")}"
+				.also { block.groovyClassName = it }
+		val className = "GroovyBlock_${block.id.toString().replace("-", "")}"
+		val groovySource = wrapGroovySource(className, script, block.inputNames, block.outputNames)
+		val simpleName = fqcn.substringAfterLast('.')
+		val jarFile = File(outputDir, "$simpleName.jar")
+
 		val config = CompilerConfiguration().apply {
 			targetDirectory = File("build/tmp/groovy-classes")
 			targetBytecode = "11"
@@ -30,10 +34,10 @@ object GroovyJarCompiler {
 		if (!classFile.exists()) {
 			throw IllegalStateException("Не найден .class: ${classFile.absolutePath}")
 		}
-		outputJarFile.parentFile?.mkdirs()
+		jarFile.parentFile?.mkdirs()
 
 		// собираем JAR только с нашим классом
-		JarOutputStream(FileOutputStream(outputJarFile)).use { jar ->
+		JarOutputStream(FileOutputStream(jarFile)).use { jar ->
 			val added = mutableSetOf<String>()
 			config.targetDirectory
 				.walkTopDown()
@@ -50,7 +54,8 @@ object GroovyJarCompiler {
 					}
 				}
 		}
-		println("JAR создан (только скрипт): ${outputJarFile.absolutePath}")
+		println("JAR создан (только скрипт): ${jarFile.absolutePath}")
+		return jarFile
 	}
 
 

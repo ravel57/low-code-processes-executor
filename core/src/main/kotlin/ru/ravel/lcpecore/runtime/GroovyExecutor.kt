@@ -3,6 +3,7 @@ package ru.ravel.lcpecore.runtime
 interface GroovyExecutor {
 	fun exec(
 		code: String,
-		bindings: Map<String, Any?>
+		bindings: Map<String, Any?>,
+		groovyClassName: String? = null
 	): Any?
 }

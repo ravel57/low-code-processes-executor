@@ -1,6 +1,7 @@
 package ru.ravel.lcpecore.model
 
 import com.fasterxml.jackson.annotation.*
+import java.io.File
 import java.util.*
 
 
@@ -63,10 +64,16 @@ data class CoreBlock @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) constructo
 	@JsonProperty("y")
 	@JsonAlias("uiY")
 	var uiY: Double? = null,
+
+	@JsonProperty("groovyClassName")
+	var groovyClassName: String? = null,
 ) {
 
 	@JsonIgnore
 	var outputsData: MutableList<MutableMap<String, Any?>> = mutableListOf()
+
+	@JsonIgnore
+	var codeAbsolutePath: File? = null
 
 
 	@JsonIgnore

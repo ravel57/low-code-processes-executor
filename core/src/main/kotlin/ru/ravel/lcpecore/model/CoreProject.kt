@@ -8,8 +8,12 @@ import java.io.File
 data class CoreProject @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) constructor(
 	@JsonProperty("blocks")
 	val blocks: MutableList<CoreBlock> = mutableListOf(),
+
 	@JsonProperty("connections")
 	val connections: MutableList<CoreConnection> = mutableListOf(),
+
+	@JsonProperty("name")
+	val name: String? = "",
 ) {
 	@JsonIgnore
 	var baseDir: File? = null
