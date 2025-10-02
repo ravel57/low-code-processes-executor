@@ -1,4 +1,4 @@
-package ru.ravel.lcpeandrotd
+package ru.ravel.lcpeandroid
 
 import ru.ravel.lcpecore.io.OutputsRepository
 import ru.ravel.lcpecore.model.CoreProject

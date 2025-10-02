@@ -132,6 +132,4 @@ object GroovyJarCompiler {
 		return fixed
 	}
 
-
-
 }

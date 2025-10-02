@@ -1,4 +1,4 @@
-package ru.ravel.lcpeandrotd
+package ru.ravel.lcpeandroid
 
 import android.content.Context
 import ru.ravel.lcpecore.io.ProjectRepository
