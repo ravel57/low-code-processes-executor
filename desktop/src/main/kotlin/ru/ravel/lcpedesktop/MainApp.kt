@@ -89,7 +89,7 @@ class MainApp : Application() {
 	}
 
 	// Состояние проекта в UI
-	private var currentProjectFile: File? = null
+	var currentProjectFile: File? = null
 	val blocks = mutableListOf<BlockNode>()
 	private val connections = mutableListOf<Connection>()
 	private var selectedBlock: BlockNode? = null
@@ -158,13 +158,12 @@ class MainApp : Application() {
 		},
 		onShowOutput = { bn, outIdx -> showOutputFor(bn, outIdx) },
 
-		onOpenSubProject = { file ->
+		onOpenSubProject = { rawFile ->
+			val file = resolveProjectFile(rawFile.path)
 			val stage = Stage()
 			val project = projectRepo.loadProject(file)
-			normalizePathsAfterLoad(
-				project,
-				file
-			)
+			project.baseDir = file.parentFile
+			normalizePathsAfterLoad(project)
 			val subApp = MainApp()
 			subApp.start(stage)
 			Platform.runLater {
@@ -340,7 +339,9 @@ class MainApp : Application() {
 								}
 								fc.showOpenDialog(primaryStage)?.let { file ->
 									val node = addBlock(event.x, event.y, file.nameWithoutExtension, type)
-									node.core.subProjectPath = file.absolutePath
+									val base = currentProjectFile?.parentFile ?: File(".")
+									node.core.subProjectPath = base.toPath().relativize(file.toPath()).toString()
+										.replace('\\', '/')
 									adjustSubProjectNodeIO(node, file)
 								}
 							}
@@ -382,7 +383,8 @@ class MainApp : Application() {
 				}
 				fc.showOpenDialog(stage)?.let { f ->
 					val project = projectRepo.loadProject(f)
-					normalizePathsAfterLoad(project, f)
+					project.baseDir = f.parentFile
+					normalizePathsAfterLoad(project)
 					restoreUiFromCore(project)
 					outputsRepo.loadLast(f, project)
 					applyOutputsToUi(project)
@@ -414,7 +416,9 @@ class MainApp : Application() {
 
 		val runBtn = Button("Бег").apply {
 			setOnAction {
-				val project = collectCoreProject()
+				val project = collectCoreProject().apply {
+					baseDir = currentProjectFile?.parentFile ?: File(".")
+				}
 				runController.runAsync(project, currentProjectFile, object : RunEvents {
 					override fun onStart(block: CoreBlock) {
 						val ui = blocks.find { it.core.id == block.id }
@@ -450,17 +454,21 @@ class MainApp : Application() {
 
 		val buildAndroidBtn = Button("Собрать под Android").apply {
 			setOnAction {
-				val project = collectCoreProject()
-				val outputDir = File("android_build").apply { mkdirs() }
-				val tmpJars = mutableListOf<File>()
-				project.blocks.filter { it.type == BlockType.MAPPING_GROOVY }.forEachIndexed { idx, block ->
-					val code = block.codePath?.let { File(it).takeIf { f -> f.exists() }?.readText() }
-						?: return@forEachIndexed
-					val className = "GroovyBlock_${idx}_${block.id.toString().replace("-", "")}"
-					val jarFile = File(outputDir, "$className.jar")
-					GroovyJarCompiler.compileToJar(code, className, jarFile, block.inputNames, block.outputNames)
-					tmpJars.add(jarFile)
+				val outputDir = File("android_build").apply {
+					deleteRecursively()
+					mkdirs()
 				}
+				val tmpJars = mutableListOf<File>()
+				collectAllBlocks(currentProjectFile ?: return@setOnAction)
+					.filter { it.type == BlockType.MAPPING_GROOVY }
+					.forEachIndexed { idx, block ->
+						val code = block.codePath?.let { File(it).takeIf { f -> f.exists() }?.readText() }
+							?: return@forEachIndexed
+						val className = "GroovyBlock_${idx}_${block.id.toString().replace("-", "")}"
+						val jarFile = File(outputDir, "$className.jar")
+						GroovyJarCompiler.compileToJar(code, className, jarFile, block.inputNames, block.outputNames)
+						tmpJars.add(jarFile)
+					}
 				val mergedJar = File(outputDir, "all-blocks.jar")
 				val dexFile = File(outputDir, "groovy-blocks-dex.jar")
 				DexCompiler.mergeAllBlockJars(mergedJar, outputDir)
@@ -472,7 +480,6 @@ class MainApp : Application() {
 				}.showAndWait()
 			}
 		}
-
 
 
 		val saves = HBox(10.0, newBtn, openBtn, saveBtn).apply { padding = Insets(8.0) }
@@ -597,7 +604,9 @@ class MainApp : Application() {
 				}
 			}
 			if (isNeedToRun) {
-				val project = collectCoreProject()
+				val project = collectCoreProject().apply {
+					baseDir = currentProjectFile?.parentFile ?: File(".")
+				}
 				val file = currentProjectFile
 				runController.runAsync(project, file, object : RunEvents {
 					override fun onStart(block: CoreBlock) {
@@ -1045,18 +1054,23 @@ class MainApp : Application() {
 					x = cb.uiX ?: 50.0,
 					y = cb.uiY ?: 50.0,
 					loadCode = { core ->
-						core.codePath?.let { p -> File(p).takeIf { it.exists() && it.isFile }?.readText() } ?: ""
+						val base = currentProjectFile?.parentFile ?: File(".")
+						core.codePath?.let { p ->
+							val file = File(p).let { if (File(p).isAbsolute) File(p) else File(base, p) }.normalize()
+							file.takeIf { it.exists() && it.isFile }?.readText()
+						} ?: ""
 					},
 					saveCode = { core, text ->
-						val file = core.codePath?.let { File(it) } ?: codeFileFor(core)
+						val base = currentProjectFile?.parentFile ?: File(".")
+						val file = /*core.codePath?.let { File(it) } ?:*/ codeFileFor(core)
 						file.writeText(text)
-						core.codePath = file.absolutePath
+						core.codePath = base.toPath().relativize(file.toPath()).toString().replace('\\', '/')
 						markDirty()
 					},
 					callbacks = callbacks,
 				)
 				if (b.core.type == BlockType.SUB_PROJECT && b.core.subProjectPath.isNotBlank()) {
-					val f = File(b.core.subProjectPath)
+					val f = resolveProjectFile(b.core.subProjectPath)
 					if (f.exists()) adjustSubProjectNodeIO(b, f)
 				}
 				b.onMove = {
@@ -1235,41 +1249,9 @@ class MainApp : Application() {
 	}
 
 
-	private fun loadCodeFromDisk(b: CoreBlock): String {
-		val path = b.codePath ?: return ""
-		val base = currentProjectFile?.parentFile
-		val f = File(path).let { if (it.isAbsolute) it else File(base, path) }
-		return runCatching { f.readText() }.getOrElse { "" }
+	private fun normalizePathsAfterLoad(project: CoreProject) {
+		project.blocks.forEach { it.ensureIoIds() }
 	}
-
-
-	private fun saveCodeToDisk(b: CoreBlock, text: String) {
-		val baseDir = currentProjectFile?.parentFile ?: File(".")
-		val file = b.codePath?.let { p ->
-			val f = File(p)
-			if (f.isAbsolute) f else File(baseDir, p)
-		} ?: codeFileFor(b)
-		file.writeText(text)
-		val rel = baseDir.toPath().relativize(file.toPath()).toString().replace('\\', '/')
-		b.codePath = rel
-		markDirty()
-	}
-
-
-	private fun normalizePathsAfterLoad(project: CoreProject, projectFile: File) {
-		val base = projectFile.parentFile
-		project.blocks.forEach { b ->
-			b.codePath = b.codePath
-				?.takeIf { it.isNotBlank() }
-				?.let { p -> File(p).let { if (it.isAbsolute) it else File(base, p) }.absolutePath }
-
-			b.subProjectPath = b.subProjectPath
-				.takeIf { it.isNotBlank() }
-				?.let { p -> File(p).let { if (it.isAbsolute) it else File(base, p) }.absolutePath }
-				?: ""
-		}
-	}
-
 
 	/** Прочитать подпроект и выставить I/O у SUB_PROJECT-ноды.
 	 * ВХОДЫ: столько, сколько в подпроекте START-блоков (имена берём из name START-блоков или генерируем inN).
@@ -1318,9 +1300,10 @@ class MainApp : Application() {
 
 
 	/** Открыть проект в этом окне, как раньше (восстановление UI + outputs). */
-	fun importBlocksFromFile(file: File) {
+	private fun importBlocksFromFile(file: File) {
 		val project = projectRepo.loadProject(file)
-		normalizePathsAfterLoad(project, file)
+		project.baseDir = file.parentFile
+		normalizePathsAfterLoad(project)
 		restoreUiFromCore(project)
 		outputsRepo.loadLast(file, project)
 		applyOutputsToUi(project)
@@ -1420,6 +1403,34 @@ class MainApp : Application() {
 		if (changed) {
 			contentPane.requestLayout()
 		}
+	}
+
+
+	private fun collectAllBlocks(projectFile: File, visited: MutableSet<String> = mutableSetOf()): List<CoreBlock> {
+		if (!projectFile.exists()) {
+			return emptyList()
+		}
+		if (!visited.add(projectFile.absolutePath)) {
+			return emptyList()
+		}
+		val project = projectRepo.loadProject(projectFile)
+		val allBlocks = mutableListOf<CoreBlock>()
+		allBlocks.addAll(project.blocks)
+		project.blocks.forEach { block ->
+			if (block.subProjectPath.isNotBlank()) {
+				val subFile = resolveProjectFile(block.subProjectPath)
+				if (subFile.exists()) {
+					allBlocks.addAll(collectAllBlocks(subFile, visited))
+				}
+			}
+		}
+		return allBlocks
+	}
+
+
+	fun resolveProjectFile(path: String): File {
+		val base = currentProjectFile?.parentFile ?: File(".")
+		return File(path).let { if (it.isAbsolute) it else File(base, path) }.normalize()
 	}
 
 

@@ -54,35 +54,79 @@ object GroovyJarCompiler {
 	}
 
 
-	private fun wrapGroovySource(className: String, script: String, inputs: List<String>, outputs: List<String>): String {
+	private fun wrapGroovySource(
+		className: String,
+		script: String,
+		inputs: List<String>,
+		outputs: List<String>
+	): String {
 		val lines = script.lines()
-
 		val imports = lines.filter { it.trim().startsWith("import ") }
 			.joinToString("\n")
-
 		val body = lines.filterNot { it.trim().startsWith("import ") }
 			.joinToString("\n")
-
-		val inputDecls = inputs.mapIndexed { idx, nm -> "def in$idx = inputs[\"$nm\"]" }.joinToString("\n        ")
-		val outputDecls = outputs.mapIndexed { idx, nm -> "def out$idx = [:]" }.joinToString("\n        ")
-		val outputReturn = outputs.mapIndexed { idx, nm -> "out$idx: out$idx" }.joinToString(", ")
-
+		val inputDecls = inputs.joinToString("\n        ") { nm -> "def $nm = inputs[\"$nm\"]" }
+		val outputDecls = outputs.joinToString("\n        ") { nm -> "def $nm = [:]" }
+		val outputReturn = outputs.joinToString(", ") { nm -> "$nm: $nm" }
+		val fixedBody = fixForAndroid(body, inputs, outputs)
 		return """
 	        |package ru.ravel.scripts
 	        |
 	        |@GrabConfig(initContextClass=false)
 	        |import groovy.transform.CompileStatic
 	        |$imports
-            |class $className {
-            |    static Map<String,Object> run(Map<String,Object> inputs) {
-            |        $inputDecls
-            |        $outputDecls
-			|
-            |        $body
-			|
-            |        return [$outputReturn]
-            |    }
-            |}
-            """.trimMargin()
+	        |class $className {
+	        |    static Map<String,Object> run(Map<String,Object> inputs) {
+	        |        $inputDecls
+	        |        $outputDecls
+	        |
+	        |        $fixedBody
+	        |
+	        |        return [$outputReturn]
+	        |    }
+	        |}
+	        """.trimMargin()
 	}
+
+
+	private fun fixForAndroid(body: String, inputs: List<String>, outputs: List<String>): String {
+		var fixed = body
+		val ignoreVars = (inputs + outputs).toSet()
+		fixed = Regex("""(\w+)\.(\w+)\s*=\s*([^\n]+)""")
+			.replace(fixed) { m ->
+				val obj = m.groupValues[1]
+				val prop = m.groupValues[2]
+				val value = m.groupValues[3].trim()
+				if (obj in ignoreVars) {
+					return@replace m.value // игнорируем inputs/outputs
+				}
+				val setter = "set" + prop.replaceFirstChar { it.uppercaseChar() }
+				"$obj.$setter($value)"
+			}
+		val getterProps = listOf("outputStream", "inputStream", "errorStream", "responseCode", "headerFields")
+		getterProps.forEach { prop ->
+			fixed = Regex("""(\w+)\.$prop\b""").replace(fixed) { m ->
+				val obj = m.groupValues[1]
+				if (obj in ignoreVars) {
+					m.value // для input/output ничего не меняем
+				} else {
+					"$obj.get${prop.replaceFirstChar { it.uppercaseChar() }}()"
+				}
+			}
+		}
+		fixed = Regex("""(\w+)\.(key|value)\b""")
+			.replace(fixed) { m ->
+				val obj = m.groupValues[1]
+				val prop = m.groupValues[2]
+				if (obj in ignoreVars) {
+					m.value // оставляем как есть
+				} else {
+					"$obj.get${prop.replaceFirstChar { it.uppercaseChar() }}()"
+				}
+			}
+		return fixed
+	}
+
+
+
 }

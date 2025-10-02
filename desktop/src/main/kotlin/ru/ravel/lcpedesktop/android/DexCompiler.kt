@@ -39,8 +39,12 @@ object DexCompiler {
 			fun addJar(jar: File) {
 				JarFile(jar).use { jf ->
 					for (entry in jf.entries()) {
-						if (entry.isDirectory) continue
-						if (entry.name.startsWith("META-INF/services/")) continue // сервисы перезапишем сами
+						if (entry.isDirectory) {
+							continue
+						}
+						if (entry.name.startsWith("META-INF/services/")) {
+							continue
+						}
 						val bytes = jf.getInputStream(entry).readBytes()
 						jos.putNextEntry(JarEntry(entry.name))
 						jos.write(bytes)
@@ -48,10 +52,8 @@ object DexCompiler {
 					}
 				}
 			}
-
 			addJar(runtimeJar)
 			addJar(inputJar)
-
 			// записываем объединённые services
 			for ((name, lines) in services) {
 				jos.putNextEntry(JarEntry(name))
@@ -80,7 +82,6 @@ object DexCompiler {
 			"--release",
 			"--output", outDexDir.absolutePath,
 			"--lib", androidJar.absolutePath,
-			// runtimeJar — только как classpath для d8, чтобы были ссылки на Groovy классы
 			runtimeJar.absolutePath,
 			inputJar.absolutePath
 		)
@@ -89,20 +90,12 @@ object DexCompiler {
 		val proc = pb.start()
 		val log = proc.inputStream.bufferedReader().readText()
 		val exit = proc.waitFor()
-		if (exit != 0) error("d8=$exit\n$log")
+		if (exit != 0) {
+			error("d8=$exit\n$log")
+		}
 		require(classesDex.exists() && classesDex.length() > 5_000) {
 			"classes.dex подозрительно маленький (${classesDex.length()} байт)\n$log"
 		}
-
-		// --- Собираем выходной JAR: classes.dex + нужные META-INF из runtimeJar ---
-		val requiredEntries = setOf(
-			"META-INF/dgminfo",
-			"META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule",
-			"META-INF/groovy/org.codehaus.groovy.source.Extensions",
-			"META-INF/services/org.codehaus.groovy.vmplugin.VMPlugin",
-			"META-INF/services/org.codehaus.groovy.vmplugin.VMPluginFactory",
-			"META-INF/services/org.apache.groovy.json.FastStringServiceFactory"
-		)
 
 		outputDexJar.parentFile?.mkdirs()
 		ZipOutputStream(outputDexJar.outputStream()).use { zos ->
@@ -110,41 +103,29 @@ object DexCompiler {
 			zos.putNextEntry(ZipEntry("classes.dex"))
 			classesDex.inputStream().use { it.copyTo(zos) }
 			zos.closeEntry()
-
 			// ресурсы из groovy-runtime-res.jar
 			val resourcesJar = File("scripts/groovy-runtime-res.jar")
 			if (resourcesJar.exists()) {
 				ZipFile(resourcesJar).use { zf ->
 					for (entry in zf.entries()) {
-						if (entry.isDirectory || entry.name == "classes.dex") continue
+						if (entry.isDirectory || entry.name == "classes.dex") {
+							continue
+						}
 						zos.putNextEntry(ZipEntry(entry.name))
 						zf.getInputStream(entry).use { it.copyTo(zos) }
 						zos.closeEntry()
 					}
 				}
 			}
-
 			// хардкод VMPluginFactory, если нет
 			val servicePath = "META-INF/services/org.codehaus.groovy.vmplugin.VMPluginFactory"
 			zos.putNextEntry(ZipEntry(servicePath))
 			zos.write("org.codehaus.groovy.vmplugin.v8.Java8\n".toByteArray())
 			zos.closeEntry()
 		}
-
 		println("DEX JAR создан: ${outputDexJar.absolutePath} (size=${outputDexJar.length()} байт)")
 	}
 
-
-	private fun zipFiles(inputFiles: List<File>, outputZip: File) {
-		ZipOutputStream(FileOutputStream(outputZip)).use { zipOut ->
-			inputFiles.forEach { file ->
-				val entry = ZipEntry(file.name)
-				zipOut.putNextEntry(entry)
-				file.inputStream().use { it.copyTo(zipOut) }
-				zipOut.closeEntry()
-			}
-		}
-	}
 
 	fun mergeAllBlockJars(outputJar: File, blocksDir: File) {
 		if (outputJar.exists()) {

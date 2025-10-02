@@ -149,7 +149,7 @@ class EngineRunner(
 				BlockType.MAPPING_GROOVY -> {
 					val inputs = collectInputs(block, project)
 					val outputs = prepareOutputs(block)
-					val code = readCode(block)
+					val code = readCode(block, project)
 					val inout: MutableMap<String, Any?> = inputs.toMutableMap().apply { putAll(outputs) }
 					requireNotNull(groovy) { "GroovyExecutor is not provided" }.exec(code, inout)
 					block.outputNames.map { name ->
@@ -178,7 +178,7 @@ class EngineRunner(
 
 				BlockType.MAPPING_JAVA_SCRIPT -> {
 					val inputs = collectInputs(block, project)
-					val code = readCode(block)
+					val code = readCode(block, project)
 					val result = requireNotNull(js) { "JsExecutor is not provided" }
 						.exec(code, inputs, block.outputNames)
 					block.outputNames.map { name ->
@@ -188,7 +188,7 @@ class EngineRunner(
 
 				BlockType.INPUT_DATA -> {
 					val inputs = collectInputs(block, project)
-					val text = readCode(block)
+					val text = readCode(block, project)
 					val parsed: MutableMap<String, Any?> = InputParsers.parse(block.inputFormat, text)
 						.mapValues { it.value }
 						.toMutableMap()
@@ -208,7 +208,7 @@ class EngineRunner(
 
 				BlockType.START -> {
 					val inputs = collectInputs(block, project)
-					val text = readCode(block).trim()
+					val text = readCode(block, project).trim()
 					val current = block.outputsData.map { it.toMutableMap() }.toMutableList()
 					val base = if (current.isEmpty()) {
 						mutableMapOf()
@@ -272,12 +272,26 @@ class EngineRunner(
 		return inputs
 	}
 
+
 	private fun prepareOutputs(block: CoreBlock): MutableMap<String, MutableMap<String, Any?>> =
 		block.outputNames.associateWith { mutableMapOf<String, Any?>() }.toMutableMap()
 
-	private fun readCode(block: CoreBlock): String {
-		return block.codePath?.let { p -> File(p).takeIf { it.exists() && it.isFile }?.readText() } ?: ""
+
+	private fun readCode(block: CoreBlock, project: CoreProject): String {
+		val path = block.codePath
+			?: return ""
+		val baseDir = project.baseDir
+			?: File(".")
+		val file = File(path).let {
+			if (it.isAbsolute) {
+				it
+			} else {
+				File(baseDir, path)
+			}
+		}.normalize()
+		return file.takeIf { it.exists() && it.isFile }?.readText() ?: ""
 	}
+
 
 	/** Индекс входящих рёбер: для каждого блока — список «родителей» */
 	private fun CoreProject.incomingIndex(): Map<CoreBlock, List<CoreBlock>> {

@@ -23,6 +23,22 @@ android {
 		}
 	}
 
+	compileOptions {
+		sourceCompatibility JavaVersion.VERSION_1_8
+		targetCompatibility JavaVersion.VERSION_1_8
+	}
+
+	kotlinOptions {
+		jvmTarget = "1.8"
+	}
+
+	buildTypes {
+		release {
+			minifyEnabled false
+			proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+		}
+	}
+
 	// важно — убираем всё лишнее из паковки
 	publishing {
 		singleVariant("release")
@@ -30,6 +46,11 @@ android {
 }
 
 dependencies {
-//	implementation project(":core")
+	implementation project(':core')
 	implementation files("../core/build/libs/core-thin.jar")
+	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0"
+	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0"
+	implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.0'
+	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.20.0'
+	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.20.0'
 }

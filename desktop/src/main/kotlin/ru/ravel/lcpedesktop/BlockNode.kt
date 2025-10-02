@@ -151,7 +151,8 @@ class BlockNode(
 					menu.items += MenuItem("Открыть подпроект").apply {
 						setOnAction {
 							core.subProjectPath.let { path ->
-								val file = File(path)
+								val app = (scene?.window?.userData as? MainApp)
+								val file = app?.resolveProjectFile(path) ?: File(path)
 								if (file.exists()) {
 									callbacks.onOpenSubProject(file)
 								} else {
@@ -254,7 +255,15 @@ class BlockNode(
 
 		fun makeSubProjectPropsTab(): Tab? {
 			val path = core.subProjectPath
-			val projectFile = File(path)
+			val projectFile = File(path).let {
+				if (it.isAbsolute) it
+				else {
+					val base = (scene.window.userData as? MainApp)
+						?.currentProjectFile?.parentFile
+						?: File(".")
+					File(base, path)
+				}
+			}.normalize()
 			if (!projectFile.exists()) {
 				return null
 			}
