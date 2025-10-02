@@ -1,7 +1,6 @@
 package ru.ravel.lcpedesktop.android
 
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.jar.JarEntry
 import java.util.jar.JarFile
@@ -11,80 +10,14 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 object DexCompiler {
-	fun jarToApk(inputJar: File, outputApk: File) {
-		val androidHome = "C:\\Users\\petr\\AppData\\Local\\Android\\Sdk"
 
-		val buildToolsDir = File(androidHome, "build-tools/34.0.0")
-		val d8 = listOf("d8.bat", "d8").map { File(buildToolsDir, it) }.firstOrNull { it.exists() }
-			?: throw IllegalStateException("Не найден d8 в $buildToolsDir")
-
-		if (!d8.exists()) {
-			throw IllegalStateException("Не найден d8 по пути: ${d8.absolutePath}")
-		}
-
-		val outDexDir = File("build/tmp/dex").apply { mkdirs() }
-
-		// Шаг 1: прогоняем jar через d8
-		val process = ProcessBuilder(
-			d8.absolutePath,
-			"--release",
-			"--output", outDexDir.absolutePath,
-			inputJar.absolutePath
-		)
-			.redirectErrorStream(true)
-			.start()
-
-		val log = process.inputStream.bufferedReader().readText()
-		val code = process.waitFor()
-		if (code != 0) {
-			throw RuntimeException("d8 завершился с ошибкой $code\n$log")
-		}
-
-		// Шаг 2: упаковываем classes.dex в apk (zip)
-		val classesDex = File(outDexDir, "classes.dex")
-		if (!classesDex.exists()) {
-			throw IllegalStateException("Не найден classes.dex")
-		}
-
-		zipFiles(listOf(classesDex), outputApk)
-
-		println("APK создан: ${outputApk.absolutePath}")
-	}
-
-	fun jarToDex(jarFile: File, dexOut: File) {
-		val androidHome = "C:\\Users\\petr\\AppData\\Local\\Android\\Sdk"
-		if (!jarFile.exists()) error("Jar file not found: ${jarFile.absolutePath}")
-		dexOut.parentFile.mkdirs()
-
-		val buildToolsDir = File(androidHome, "build-tools/34.0.0")
-		val d8 = listOf("d8.bat", "d8").map { File(buildToolsDir, it) }.firstOrNull { it.exists() }?.absolutePath
-			?: throw IllegalStateException("Не найден d8 в $buildToolsDir")
-
-		val process = ProcessBuilder(
-			d8,
-			"--release",
-			"--output", dexOut.parentFile.absolutePath,  // указываем директорию
-			jarFile.absolutePath
-		)
-			.redirectErrorStream(true)
-			.start()
-
-		val result = process.inputStream.bufferedReader().readText()
-		val exitCode = process.waitFor()
-		if (exitCode != 0) {
-			error("d8 failed ($exitCode): $result")
-		}
-
-		println("DEX создан: ${File(dexOut.parentFile, "classes.dex").absolutePath}")
-	}
-
-	fun jarToDexJar(inputJar: File,outputDexJar: File,runtimeJar: File = File("libs/groovy/groovy-4.0.28.jar"), minApi: Int = 26) {
-		require(inputJar.exists()) { "Нет ${inputJar.absolutePath}" }
-		require(runtimeJar.exists()) { "Нет ${runtimeJar.absolutePath}" }
-
-		val androidHome = System.getenv("ANDROID_HOME")
-			?: "C:\\Users\\petr\\AppData\\Local\\Android\\Sdk"
-
+	fun jarToDexJar(
+		inputJar: File,
+		outputDexJar: File,
+		runtimeJar: File = File("libs/groovy/groovy-4.0.28.jar"),
+		minApi: Int = 26,
+	) {
+		val androidHome = System.getenv("ANDROID_HOME")!!
 		// --- d8 ---
 		val buildToolsDir = File(androidHome, "build-tools")
 		val d8 = buildToolsDir.listFiles()
@@ -93,13 +26,11 @@ object DexCompiler {
 			?.flatten()
 			?.firstOrNull { it.exists() }
 			?: throw IllegalStateException("Не найден d8 в $buildToolsDir")
-
 		// --- android.jar (для --lib) ---
 		val androidJar = listOf(34, 33, 32, 31, 30, 29, 28, 27, 26)
 			.map { File(androidHome, "platforms/android-$it/android.jar") }
 			.firstOrNull { it.exists() }
 			?: throw IllegalStateException("Не найден android.jar в $androidHome\\platforms")
-
 		// --- собираем fat-jar ---
 		val combinedJar = createTempFile(prefix = "combined-", suffix = ".jar")
 		JarOutputStream(FileOutputStream(combinedJar)).use { jos ->
@@ -139,8 +70,9 @@ object DexCompiler {
 		// --- d8 ---
 		val outDexDir = createTempDir(prefix = "d8-out-")
 		val classesDex = File(outDexDir, "classes.dex")
-		if (classesDex.exists()) classesDex.delete()
-
+		if (classesDex.exists()) {
+			classesDex.delete()
+		}
 		// --- команда d8: опции -> затем Program JAR ---
 		val args = mutableListOf(
 			d8.absolutePath,
@@ -173,9 +105,9 @@ object DexCompiler {
 		)
 
 		outputDexJar.parentFile?.mkdirs()
-		java.util.zip.ZipOutputStream(outputDexJar.outputStream()).use { zos ->
+		ZipOutputStream(outputDexJar.outputStream()).use { zos ->
 			// 1) classes.dex
-			zos.putNextEntry(java.util.zip.ZipEntry("classes.dex"))
+			zos.putNextEntry(ZipEntry("classes.dex"))
 			classesDex.inputStream().use { it.copyTo(zos) }
 			zos.closeEntry()
 
@@ -202,62 +134,6 @@ object DexCompiler {
 		println("DEX JAR создан: ${outputDexJar.absolutePath} (size=${outputDexJar.length()} байт)")
 	}
 
-	/**
-	 * Собирает единый groovy-runtime.jar из groovy-зависимостей
-	 */
-	private fun buildGroovyRuntimeJar(groovyJars: List<File>, runtimeJar: File) {
-		val tmpDir = File("build/tmp/groovy-merge").apply {
-			deleteRecursively()
-			mkdirs()
-		}
-
-		// Распаковываем groovy-*.jar
-		for (jar in groovyJars) {
-			ProcessBuilder("jar", "xf", jar.absolutePath)
-				.directory(tmpDir)
-				.inheritIO()
-				.start()
-				.waitFor()
-		}
-
-		// Собираем единый runtime.jar
-		ProcessBuilder("jar", "cf", runtimeJar.absolutePath, ".")
-			.directory(tmpDir)
-			.inheritIO()
-			.start()
-			.waitFor()
-
-		println("Groovy runtime jar создан: ${runtimeJar.absolutePath}")
-	}
-
-	fun buildGroovyRuntimeDexJar(groovyJars: List<File>, outputDexJar: File) {
-		val tmpDir = File("build/tmp/groovy-merge").apply {
-			deleteRecursively()
-			mkdirs()
-		}
-
-		// 1) Распаковываем каждый groovy-*.jar в tmpDir
-		for (jar in groovyJars) {
-			ProcessBuilder("jar", "xf", jar.absolutePath)
-				.directory(tmpDir)
-				.inheritIO()
-				.start()
-				.waitFor()
-		}
-
-		// 2) Собираем единый groovy-runtime.jar
-		val runtimeJar = File("build/libs/groovy-runtime.jar").apply { parentFile.mkdirs() }
-		ProcessBuilder("jar", "cf", runtimeJar.absolutePath, ".")
-			.directory(tmpDir)
-			.inheritIO()
-			.start()
-			.waitFor()
-
-		// 3) Конвертим в DEX-JAR
-		jarToDexJar(runtimeJar, outputDexJar)
-
-		println("Groovy runtime dex jar создан: ${outputDexJar.absolutePath}")
-	}
 
 	private fun zipFiles(inputFiles: List<File>, outputZip: File) {
 		ZipOutputStream(FileOutputStream(outputZip)).use { zipOut ->
@@ -270,14 +146,31 @@ object DexCompiler {
 		}
 	}
 
-	fun packDexToJar(dexFile: File, jarFile: File) {
-		ZipOutputStream(FileOutputStream(jarFile)).use { zos ->
-			FileInputStream(dexFile).use { fis ->
-				val entry = ZipEntry("classes.dex")
-				zos.putNextEntry(entry)
-				fis.copyTo(zos)
-				zos.closeEntry()
+	fun mergeAllBlockJars(outputJar: File, blocksDir: File) {
+		if (outputJar.exists()) {
+			outputJar.delete()
+		}
+		JarOutputStream(FileOutputStream(outputJar)).use { jos ->
+			blocksDir.listFiles { f -> f.extension == "jar" }?.forEach { jar ->
+				if (jar.name == outputJar.name) {
+					return@forEach
+				}
+				JarFile(jar).use { jf ->
+					for (entry in jf.entries()) {
+						if (entry.isDirectory) {
+							continue
+						}
+						if (entry.name.startsWith("META-INF/")) {
+							continue
+						}
+						val bytes = jf.getInputStream(entry).readBytes()
+						jos.putNextEntry(JarEntry(entry.name))
+						jos.write(bytes)
+						jos.closeEntry()
+					}
+				}
 			}
 		}
 	}
+
 }

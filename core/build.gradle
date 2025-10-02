@@ -8,6 +8,7 @@ java {
 	sourceCompatibility = JavaVersion.VERSION_21
 	targetCompatibility = JavaVersion.VERSION_21
 	toolchain { languageVersion = JavaLanguageVersion.of(21) }
+	withSourcesJar()
 }
 
 dependencies {
@@ -16,4 +17,9 @@ dependencies {
 	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.20.0'
 	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.20.0'
 	implementation 'org.yaml:snakeyaml:2.5'
+}
+
+tasks.register('thinJar', Jar) {
+	archiveClassifier.set('thin')
+	from(sourceSets.main.output)
 }

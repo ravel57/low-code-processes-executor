@@ -16,36 +16,13 @@ object GroovyJarCompiler {
 	 * @param className имя генерируемого класса
 	 * @param outputJarFile jar-файл для записи
 	 */
-	fun compileToJar(script: String, className: String, outputJarFile: File) {
-		val lines = script.lines()
-
-		val imports = lines.filter { it.trim().startsWith("import ") }
-			.joinToString("\n")
-
-		val body = lines.filterNot { it.trim().startsWith("import ") }
-			.joinToString("\n")
-
-		val groovySource = """
-	        package ru.ravel.scripts
-	        
-	        @GrabConfig(initContextClass=false)
-	        import groovy.transform.CompileStatic
-	        $imports
-
-	        @CompileStatic
-	        class $className {
-	            Map<String, Object> run(Map<String,Object> input) {
-	                $body
-	            }
-	        }
-	    """.trimIndent()
-
+	fun compileToJar(script: String, className: String, outputJarFile: File, inputs: List<String>, outputs: List<String>) {
+		val groovySource = wrapGroovySource(className, script, inputs, outputs)
 		val config = CompilerConfiguration().apply {
 			targetDirectory = File("build/tmp/groovy-classes")
 			targetBytecode = "11"
 			optimizationOptions["indy"] = false
 		}
-
 		val gcl = GroovyClassLoader(this::class.java.classLoader, config)
 		val clazz = gcl.parseClass(groovySource, "$className.groovy")
 
@@ -73,9 +50,39 @@ object GroovyJarCompiler {
 					}
 				}
 		}
-
-
-
 		println("JAR создан (только скрипт): ${outputJarFile.absolutePath}")
+	}
+
+
+	private fun wrapGroovySource(className: String, script: String, inputs: List<String>, outputs: List<String>): String {
+		val lines = script.lines()
+
+		val imports = lines.filter { it.trim().startsWith("import ") }
+			.joinToString("\n")
+
+		val body = lines.filterNot { it.trim().startsWith("import ") }
+			.joinToString("\n")
+
+		val inputDecls = inputs.mapIndexed { idx, nm -> "def in$idx = inputs[\"$nm\"]" }.joinToString("\n        ")
+		val outputDecls = outputs.mapIndexed { idx, nm -> "def out$idx = [:]" }.joinToString("\n        ")
+		val outputReturn = outputs.mapIndexed { idx, nm -> "out$idx: out$idx" }.joinToString(", ")
+
+		return """
+	        |package ru.ravel.scripts
+	        |
+	        |@GrabConfig(initContextClass=false)
+	        |import groovy.transform.CompileStatic
+	        |$imports
+            |class $className {
+            |    static Map<String,Object> run(Map<String,Object> inputs) {
+            |        $inputDecls
+            |        $outputDecls
+			|
+            |        $body
+			|
+            |        return [$outputReturn]
+            |    }
+            |}
+            """.trimMargin()
 	}
 }

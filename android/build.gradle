@@ -5,38 +5,31 @@ plugins {
 
 android {
 	namespace "ru.ravel.lcpeandroid"
-	compileSdk 34
+	compileSdk 35
 
 	defaultConfig {
-		minSdk 24
+		minSdk = 26
 		targetSdk 34
+		consumerProguardFiles("consumer-rules.pro")
 	}
-
-	compileOptions {
-		sourceCompatibility JavaVersion.VERSION_21
-		targetCompatibility JavaVersion.VERSION_21
-	}
-
-	kotlinOptions {
-		jvmTarget = "21"
-	}
-
-//	sourceSets {
-//		main {
-//			java.srcDirs += ['../core/src/main/kotlin']
-//			resources.srcDirs += ['../core/src/main/resources']
-//		}
-//	}
 
 	buildTypes {
-		release { minifyEnabled false }
-		debug { minifyEnabled false }
+		release {
+			minifyEnabled = false
+			proguardFiles(
+				getDefaultProguardFile("proguard-android-optimize.txt"),
+				"proguard-rules.pro"
+			)
+		}
+	}
+
+	// важно — убираем всё лишнее из паковки
+	publishing {
+		singleVariant("release")
 	}
 }
 
 dependencies {
-	implementation files("../core/build/libs/core-all.jar")
-	implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0'
-	implementation "org.mozilla:rhino:1.7.14"
-	implementation "org.python:jython-standalone:2.7.3"
+//	implementation project(":core")
+	implementation files("../core/build/libs/core-thin.jar")
 }

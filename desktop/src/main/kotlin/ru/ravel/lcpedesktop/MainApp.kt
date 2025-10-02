@@ -43,6 +43,8 @@ import ru.ravel.lcpecore.runtime.CoreSubProjectRunner
 import ru.ravel.lcpecore.runtime.GroovyExecutor
 import ru.ravel.lcpecore.runtime.JsExecutor
 import ru.ravel.lcpecore.runtime.PythonExecutor
+import ru.ravel.lcpedesktop.android.DexCompiler
+import ru.ravel.lcpedesktop.android.GroovyJarCompiler
 import ru.ravel.lcpedesktop.model.Command
 import ru.ravel.lcpedesktop.model.DeleteBlockCommand
 import java.io.File
@@ -446,9 +448,35 @@ class MainApp : Application() {
 			}
 		}
 
+		val buildAndroidBtn = Button("Собрать под Android").apply {
+			setOnAction {
+				val project = collectCoreProject()
+				val outputDir = File("android_build").apply { mkdirs() }
+				val tmpJars = mutableListOf<File>()
+				project.blocks.filter { it.type == BlockType.MAPPING_GROOVY }.forEachIndexed { idx, block ->
+					val code = block.codePath?.let { File(it).takeIf { f -> f.exists() }?.readText() }
+						?: return@forEachIndexed
+					val className = "GroovyBlock_${idx}_${block.id.toString().replace("-", "")}"
+					val jarFile = File(outputDir, "$className.jar")
+					GroovyJarCompiler.compileToJar(code, className, jarFile, block.inputNames, block.outputNames)
+					tmpJars.add(jarFile)
+				}
+				val mergedJar = File(outputDir, "all-blocks.jar")
+				val dexFile = File(outputDir, "groovy-blocks-dex.jar")
+				DexCompiler.mergeAllBlockJars(mergedJar, outputDir)
+				DexCompiler.jarToDexJar(mergedJar, dexFile)
+				Alert(Alert.AlertType.INFORMATION).apply {
+					title = "Сборка завершена"
+					headerText = "Файл dex создан"
+					contentText = dexFile.absolutePath
+				}.showAndWait()
+			}
+		}
+
+
 
 		val saves = HBox(10.0, newBtn, openBtn, saveBtn).apply { padding = Insets(8.0) }
-		val runBox = HBox(10.0, runBtn).apply { padding = Insets(8.0) }
+		val runBox = HBox(10.0, runBtn, buildAndroidBtn).apply { padding = Insets(8.0) }
 		val root = VBox(saves, runBox, scrollPane)
 		val scene = Scene(root, windowW, windowH)
 
