@@ -49,14 +49,15 @@ import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.*
 import java.util.concurrent.Executors
 import kotlin.system.exitProcess
 
 class MainApp : Application() {
 
-	//	private lateinit var projectRepo: ProjectRepository
-//	private lateinit var outputsRepo: OutputsRepository
 	private lateinit var groovy: GroovyExecutor
 	private lateinit var python: PythonExecutor
 	private lateinit var js: JsExecutor
@@ -410,14 +411,8 @@ class MainApp : Application() {
 		}
 
 		val runBtn = Button("Бег").apply {
-			val btn = this
 			setOnAction {
-//				if (isRunning) return@setOnAction
-//				isRunning = true
-//				btn.isDisable = true
-
 				val project = collectCoreProject()
-
 				runController.runAsync(project, currentProjectFile, object : RunEvents {
 					override fun onStart(block: CoreBlock) {
 						val ui = blocks.find { it.core.id == block.id }
@@ -427,6 +422,7 @@ class MainApp : Application() {
 					override fun onFinish(block: CoreBlock) {
 						val ui = blocks.find { it.core.id == block.id }
 						Platform.runLater { ui?.executing = false }
+						currentProjectFile?.let { saveOutputsData(it) }
 					}
 
 					override fun onError(block: CoreBlock, error: Throwable) {
@@ -436,16 +432,14 @@ class MainApp : Application() {
 								headerText = null
 								contentText = error.localizedMessage
 							}.showAndWait()
-//							btn.isDisable = false
-//							isRunning = false
+							currentProjectFile?.let { saveOutputsData(it) }
 						}
 					}
 
 					override fun onCompleted(project: CoreProject) {
 						Platform.runLater {
 							applyOutputsToUi(project)
-//							btn.isDisable = false
-//							isRunning = false
+							currentProjectFile?.let { saveOutputsData(it) }
 						}
 					}
 				})
@@ -547,7 +541,7 @@ class MainApp : Application() {
 					"-f" -> {
 						val file = File(inputData[index + 1])
 						importBlocksFromFile(file)
-						importOutputsData(file)
+//						importOutputsData(file)
 						currentProjectFile = file
 						clearDirty()
 						updateTitle()
@@ -650,7 +644,7 @@ class MainApp : Application() {
 				else -> {
 					inputCount = 1
 					outputCount = 1
-					inputNames  = mutableListOf("in0")
+					inputNames = mutableListOf("in0")
 					outputNames = mutableListOf("out0")
 				}
 			}
@@ -665,7 +659,7 @@ class MainApp : Application() {
 				val file = if (b.type == BlockType.INPUT_DATA) {
 					val desiredExt = when (b.inputFormat) {
 						InputFormatType.JSON -> "json"
-						InputFormatType.XML  -> "xml"
+						InputFormatType.XML -> "xml"
 						InputFormatType.YAML -> "yaml"
 						else -> "txt"
 					}
@@ -1309,10 +1303,39 @@ class MainApp : Application() {
 
 
 	/** Совместимость со старым кодом (раньше вызывалось после importBlocksFromFile). */
-	private fun importOutputsData(file: File) {
-		val project = collectCoreProject()
-		outputsRepo.loadLast(file, project)
-		applyOutputsToUi(project)
+	private fun saveOutputsData(projectFile: File) {
+		val projectDir = projectFile.parentFile ?: File(".")
+		val outputsDir = File(projectDir, "${projectFile.nameWithoutExtension}_outputs_data")
+		outputsDir.mkdirs()
+		val outputsMap = blocks.associate { block ->
+			block.core.id.toString() to block.core.outputsData
+		}
+		val timestamp = DateTimeFormatter
+			.ofPattern("yyyyMMddHHmmss")
+			.withZone(ZoneId.systemDefault())
+			.format(Instant.now())
+		File(outputsDir, "$timestamp.json").writeText(
+			ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(outputsMap)
+		)
+		File(outputsDir, "last_run.json").writeText(
+			ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(outputsMap)
+		)
+	}
+
+
+	fun importOutputsData(projectFile: File) {
+		val projectDir = projectFile.parentFile ?: File(".")
+		val outputsDir = File(projectDir, "${projectFile.nameWithoutExtension}_outputs_data")
+		val latestFile = File(outputsDir, "last_run.json")
+		if (!latestFile.exists()) return
+		val typeRef = object : TypeReference<Map<String, List<Map<String, Any>>>>() {}
+		val outputsMap = ObjectMapper().readValue(latestFile, typeRef)
+		blocks.forEach { block ->
+			if (block.core.type in arrayOf(BlockType.PROPERTIES, BlockType.SUB_PROJECT)) return@forEach
+			outputsMap[block.core.id.toString()]?.let { list ->
+				block.core.outputsData = list.map { it.toMutableMap() }.toMutableList() as MutableList<MutableMap<String, Any?>>
+			}
+		}
 	}
 
 
@@ -1321,7 +1344,7 @@ class MainApp : Application() {
 			return
 		}
 		when (val p = node.parent) {
-			is Pane  -> p.children.remove(node)
+			is Pane -> p.children.remove(node)
 			is Group -> p.children.remove(node)
 		}
 	}

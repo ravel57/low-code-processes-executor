@@ -1,4 +1,4 @@
-package ru.ravel.lcpeandrotd
+package ru.ravel.lcpedesktop.android
 
 import groovy.lang.GroovyClassLoader
 import org.codehaus.groovy.control.CompilerConfiguration

@@ -16,9 +16,13 @@ class CoreSubProjectRunner(
 
 	override fun run(parentBlock: CoreBlock, outerProject: CoreProject): List<MutableMap<String, Any?>> {
 		val path = parentBlock.subProjectPath
-		if (path.isBlank()) return List(parentBlock.outputNames.size) { mutableMapOf() }
+		if (path.isBlank()) {
+			return List(parentBlock.outputNames.size) { mutableMapOf() }
+		}
 		val file = File(path)
-		if (!file.exists()) return List(parentBlock.outputNames.size) { mutableMapOf() }
+		if (!file.exists()) {
+			return List(parentBlock.outputNames.size) { mutableMapOf() }
+		}
 
 		val baseDir = file.parentFile
 		val sub = projectRepo.loadProject(file)
@@ -33,9 +37,13 @@ class CoreSubProjectRunner(
 		if (parentBlock.subProjectProps.isNotEmpty()) {
 			val props = parentBlock.subProjectProps.toMap()
 			sub.blocks.filter { it.type == BlockType.PROPERTIES }.forEach { pb ->
-				while (pb.outputsData.size < pb.outputNames.size) pb.outputsData.add(mutableMapOf())
+				while (pb.outputsData.size < pb.outputNames.size) {
+					pb.outputsData.add(mutableMapOf())
+				}
 				pb.outputNames.forEachIndexed { idx, name ->
-					if (name in props) pb.outputsData[idx] = mutableMapOf(name to props[name])
+					if (name in props) {
+						pb.outputsData[idx] = mutableMapOf(name to props[name])
+					}
 				}
 			}
 		}
@@ -60,7 +68,9 @@ class CoreSubProjectRunner(
 
 		fun putOut(target: CoreBlock, outIndex: Int, value: MutableMap<String, Any?>) {
 			val idx = outIndex.coerceAtLeast(0)
-			while (target.outputsData.size <= idx) target.outputsData.add(mutableMapOf())
+			while (target.outputsData.size <= idx) {
+				target.outputsData.add(mutableMapOf())
+			}
 			// не затираем другие выходы — пишем по индексу
 			target.outputsData[idx] = value
 		}
@@ -93,33 +103,47 @@ class CoreSubProjectRunner(
 		val innerExits = sub.blocks.filter { it.type == BlockType.EXIT }
 		val exitsByName = innerExits.associateBy { it.name }
 		val out = parentBlock.outputNames.mapIndexed { idx, name ->
-			val ex = exitsByName[name] ?: innerExits.getOrNull(idx)
-			?: return@mapIndexed mutableMapOf<String, Any?>()
-			val merged = mutableMapOf<String, Any?>()
-			sub.connections
-				.filter { it.toId == ex.id }
-				.sortedBy { ex.indexOfInput(it.toInputId) }
-				.forEach { ic ->
-					val src = sub.blocks.firstOrNull { it.id == ic.fromId }
-					val mm = when (val v = src?.outputsData?.getOrNull(src.indexOfOutput(ic.fromOutputId))) {
-						is MutableMap<*, *> -> v.toMutableMap()
-						is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
-						null -> mutableMapOf()
-						else -> mutableMapOf("value" to v)
+				val ex = exitsByName[name]
+					?: innerExits.getOrNull(idx)
+					?: return@mapIndexed mutableMapOf<String, Any?>()
+				val merged = mutableMapOf<String, Any?>()
+				sub.connections
+					.filter { it.toId == ex.id }
+					.sortedBy { ex.indexOfInput(it.toInputId) }
+					.forEach { ic ->
+						val src = sub.blocks.firstOrNull { it.id == ic.fromId }
+						val map = src?.outputsData?.getOrNull(src.indexOfOutput(ic.fromOutputId))
+						val mm = when (map) {
+							is MutableMap<*, *> -> map.toMutableMap()
+							is Map<*, *> -> (map as Map<String, Any?>).toMutableMap()
+							null -> mutableMapOf()
+							else -> mutableMapOf("value" to map)
+						}
+						merged.putAll(mm)
 					}
-					merged.putAll(mm)
-				}
-			merged
-		}.toMutableList()
-		while (out.size < parentBlock.outputNames.size) out += mutableMapOf()
+				merged
+			}
+			.toMutableList()
+		while (out.size < parentBlock.outputNames.size) {
+			out += mutableMapOf()
+		}
 		return out.take(parentBlock.outputNames.size)
 	}
 
+
 	private fun absolutize(base: File, p: String): String =
-		File(p).let { if (it.isAbsolute) it else File(base, p) }.absolutePath
+		File(p).let {
+			if (it.isAbsolute) {
+				it
+			} else {
+				File(base, p)
+			}
+		}.absolutePath
+
 
 	private fun CoreBlock.indexOfInput(id: UUID): Int =
 		inputIds.indexOf(id).takeIf { it >= 0 } ?: 0
+
 
 	private fun CoreBlock.indexOfOutput(id: UUID): Int =
 		outputIds.indexOf(id).takeIf { it >= 0 } ?: 0

@@ -1,4 +1,4 @@
-package ru.ravel.lcpeandrotd
+package ru.ravel.lcpedesktop.android
 
 import java.io.File
 import java.io.FileInputStream
