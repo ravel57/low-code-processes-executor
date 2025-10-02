@@ -399,16 +399,12 @@ class BlockNode(
 
 		val saveBtn = Button("Сохранить").apply {
 			setOnAction {
-				// имя
 				core.name = titleText.text
 				label.text = core.name
-
-				// сохранить код, если есть вкладка «Код»
 				tabs?.tabs?.firstOrNull { it.text == "Код" }?.let { codeTab ->
 					val codeArea = (((codeTab.content as VBox).children[0]) as VirtualizedScrollPane<*>).content as CodeArea
 					saveCode(core, codeArea.text)
 				}
-
 				if (core.type == BlockType.PROPERTIES) {
 					val tab = tabs?.tabs?.firstOrNull { it.text == "Свойства" }
 					if (tab != null) {
@@ -436,24 +432,16 @@ class BlockNode(
 						saveCode(core, json)   // сохраняем туда же, куда читали
 					}
 				}
-
-				// если есть «I/O» — забираем поля
 				tabs?.tabs?.firstOrNull { it.text == "I/O" }?.let { ioTab ->
 					val ioRoot = ioTab.content as VBox
 					val inputsBox = ioRoot.children[0] as VBox
 					val inputsListView = inputsBox.children.filterIsInstance<ListView<IOItem>>().first()
 					val newInputNames = mutableListOf<String>()
-					val newInputIds = mutableListOf<UUID>()
 					inputsListView.items.forEachIndexed { idx, item ->
 						val base = item.name.ifBlank { "in$idx" }
 						newInputNames += base
-						newInputIds += item.id
 					}
 					val normalized = run {
-						val tmpCore = core.copy() // если метода copy нет, просто используем функцию ниже на списке
-						tmpCore.inputNames = newInputNames.toMutableList()
-						tmpCore.inputCount = newInputNames.size
-						// используем тот же алгоритм, что в UI
 						val fix = mutableListOf<String>()
 						val seen = mutableSetOf<String>()
 						for (i in newInputNames.indices) {
@@ -471,14 +459,26 @@ class BlockNode(
 						fix
 					}
 					core.inputNames = normalized
-					core.inputIds = newInputIds
+					if (core.inputIds.size < normalized.size) {
+						repeat(normalized.size - core.inputIds.size) {
+							core.inputIds.add(UUID.randomUUID())
+						}
+					} else if (core.inputIds.size > normalized.size) {
+						core.inputIds = core.inputIds.take(normalized.size).toMutableList()
+					}
 					core.inputCount = normalized.size
 					val outputsBox = ioRoot.children[1] as VBox
 					val outRows = (outputsBox.children[1] as ScrollPane).content as VBox
 					core.outputNames = outRows.children.mapIndexed { idx, row ->
 						((row as HBox).children[0] as TextField).text.ifBlank { "out$idx" }
 					}.toMutableList()
-					core.ensureIoIds()
+					if (core.outputIds.size < core.outputNames.size) {
+						repeat(core.outputNames.size - core.outputIds.size) {
+							core.outputIds.add(UUID.randomUUID())
+						}
+					} else if (core.outputIds.size > core.outputNames.size) {
+						core.outputIds = core.outputIds.take(core.outputNames.size).toMutableList()
+					}
 					core.outputCount = core.outputNames.size
 				}
 				if (core.type == BlockType.MAPPING_PYTHON) {
@@ -493,7 +493,6 @@ class BlockNode(
 						core.packagesNames = newPackages.toMutableList()
 					}
 				}
-
 				recreateIOCircles()
 				callbacks.onModelChanged(core)
 				dialog.close()
@@ -656,30 +655,36 @@ class BlockNode(
 	}
 
 	fun recreateIOCircles() {
-		children.removeAll(inputCircles); children.removeAll(outputCircles)
-		inputCircles.clear(); outputCircles.clear()
+		children.removeAll(inputCircles)
+		children.removeAll(outputCircles)
+		inputCircles.clear()
+		outputCircles.clear()
+		core.ensureIoIds()
 		createIOCircles()
 		val invalid: List<Connection> = connectedLines.filter { conn ->
-			(conn.from == this && core.outputIds.none { it == conn.fromPort }) || (conn.to == this && core.inputIds.none { it == conn.toPort })
+			(conn.from == this && core.outputIds.none { it == conn.fromPort }) ||
+					(conn.to == this && core.inputIds.none { it == conn.toPort })
 		}
 		callbacks.onInvalidConnections(invalid)
 		connectedLines.removeAll(invalid)
 		updateConnectedLines()
-		// переназначить обработчики на новых кружках
-		rebuildCirclesHandlers { outIndex, outCircle ->
+		outputCircles.forEachIndexed { outIndex, outCircle ->
 			outCircle.onMousePressed = EventHandler { e ->
 				if (e.button == MouseButton.PRIMARY) {
-					callbacks.onDragStartConnection(this, outIndex); e.consume()
+					callbacks.onDragStartConnection(this, outIndex)
+					e.consume()
 				}
 			}
 			outCircle.onMouseDragged = EventHandler { e ->
 				if (e.button == MouseButton.PRIMARY) {
-					callbacks.onDragContinueConnection(e.sceneX, e.sceneY); e.consume()
+					callbacks.onDragContinueConnection(e.sceneX, e.sceneY)
+					e.consume()
 				}
 			}
 			outCircle.onMouseReleased = EventHandler { e ->
 				if (e.button == MouseButton.PRIMARY) {
-					callbacks.onDragFinishConnection(); e.consume()
+					callbacks.onDragFinishConnection()
+					e.consume()
 				}
 			}
 		}
@@ -691,6 +696,8 @@ class BlockNode(
 			val nm = core.outputNames.getOrNull(idx) ?: "out$idx"
 			Tooltip.install(c, Tooltip(nm))
 		}
+		val app = (scene?.window?.userData as? MainApp)
+		app?.setupHandlersForBlock(this)
 	}
 
 	private fun createIOCircles() {
