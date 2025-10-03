@@ -21,7 +21,11 @@ class CoreSubProjectRunner(
 		}
 
 		// резолвим путь относительно baseDir внешнего проекта
-		val subFile = File(outerProject.baseDir ?: File("."), path)
+		val subFile = if (File(path).isAbsolute) {
+			File(path)
+		} else {
+			File(outerProject.baseDir ?: File("."), path)
+		}
 		if (!subFile.exists()) {
 			return List(parentBlock.outputNames.size) { mutableMapOf() }
 		}

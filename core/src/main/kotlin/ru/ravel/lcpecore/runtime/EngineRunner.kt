@@ -48,7 +48,9 @@ class EngineRunner(
 					try {
 						runBlock(b, project)
 						val changed = DataUtils.outputsChanged(oldOutputs, b.outputsData)
-						if (changed) progressed = true
+						if (changed) {
+							progressed = true
+						}
 						listeners.forEach { it.onOutput(b, mapOf("outputs" to b.outputsData)) }
 					} catch (t: Throwable) {
 						listeners.forEach { it.onError(b, t) }
@@ -82,12 +84,14 @@ class EngineRunner(
 			return
 		}
 		val deps = ConcurrentHashMap<CoreBlock, AtomicInteger>()
-		candidates.forEach { b ->
-			val need = incoming[b].orEmpty().count { parent -> parent in candidates }
-			deps[b] = AtomicInteger(need)
-		}
 		val ready = ConcurrentLinkedQueue<CoreBlock>()
-		candidates.forEach { if (deps[it]!!.get() == 0) ready.add(it) }
+		candidates.forEach { b ->
+			val need = incoming[b].orEmpty().count { parent ->
+				parent in candidates && parent.outputsData.all { it.isEmpty() }
+			}
+			deps[b] = AtomicInteger(need)
+			if (need == 0) ready.add(b)
+		}
 		if (ready.isEmpty()) {
 			return
 		}
@@ -149,14 +153,20 @@ class EngineRunner(
 				BlockType.MAPPING_GROOVY -> {
 					val inputs = collectInputs(block, project)
 					val outputs = prepareOutputs(block)
+					val cls = block.groovyClassName?.trim().orEmpty()
 					val code = readCode(block, project)
-					val inout: MutableMap<String, Any?> = inputs.toMutableMap().apply { putAll(outputs) }
-					requireNotNull(groovy) { "GroovyExecutor is not provided" }.exec(code, inout)
+					val inout = inputs.toMutableMap().apply { putAll(outputs) }
+					val retAny = requireNotNull(groovy) { "GroovyExecutor is not provided" }.exec(code, inout, cls)
+					if (retAny is Map<*, *>) {
+						inout.putAll(retAny as Map<String, Any?>)
+					}
 					block.outputNames.map { name ->
-						@Suppress("UNCHECKED_CAST")
-						(inout[name] as? MutableMap<String, Any?>)?.toMutableMap()
-							?: outputs[name]?.toMutableMap()
-							?: mutableMapOf()
+						when (val v = inout[name]) {
+							is MutableMap<*, *> -> (v as MutableMap<String, Any?>).toMutableMap()
+							is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
+							null -> outputs[name]?.toMutableMap() ?: mutableMapOf()
+							else -> mutableMapOf("value" to v)
+						}
 					}
 				}
 
@@ -244,7 +254,9 @@ class EngineRunner(
 				else -> block.outputsData
 			}
 			block.outputsData = newOutputs.toMutableList()
-		} catch (_: Exception) {
+		} catch (t: Exception) {
+			listeners.forEach { it.onError(block, t) }
+			throw t
 		}
 	}
 
@@ -278,18 +290,21 @@ class EngineRunner(
 
 
 	private fun readCode(block: CoreBlock, project: CoreProject): String {
-		val path = block.codePath
+		val base = project.baseDir ?: File(".")
+		val raw = block.codePath
 			?: return ""
-		val baseDir = project.baseDir
-			?: File(".")
-		val file = File(path).let {
-			if (it.isAbsolute) {
-				it
+		val normalized = raw.replace('\\', '/')
+		val candidate = File(normalized).let { f ->
+			if (f.isAbsolute) {
+				f
 			} else {
-				File(baseDir, path)
+				File(base, normalized)
 			}
 		}.normalize()
-		return file.takeIf { it.exists() && it.isFile }?.readText() ?: ""
+		if (!(candidate.exists() && candidate.isFile)) {
+			return ""
+		}
+		return candidate.readText()
 	}
 
 

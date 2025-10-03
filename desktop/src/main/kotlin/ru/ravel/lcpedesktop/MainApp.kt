@@ -366,7 +366,9 @@ class MainApp : Application() {
 
 		val newBtn = Button("Новый проект").apply {
 			setOnAction {
-				if (!confirmSaveIfDirty()) return@setOnAction
+				if (!confirmSaveIfDirty()) {
+					return@setOnAction
+				}
 				blocks.clear()
 				connections.clear()
 				workspaceGroup.children.removeIf { it is BlockNode || it is Line }
@@ -711,7 +713,11 @@ class MainApp : Application() {
 					}
 					val current = b.codePath?.let { File(it) }
 					val needNew = current == null || !current.name.endsWith(".$desiredExt", ignoreCase = true)
-					if (needNew) codeFileFor(b) else current!!
+					if (needNew) {
+						codeFileFor(b)
+					} else {
+						current!!
+					}
 				} else {
 					b.codePath?.let { File(it) } ?: codeFileFor(b)
 				}
@@ -1071,7 +1077,7 @@ class MainApp : Application() {
 					},
 					saveCode = { core, text ->
 						val base = currentProjectFile?.parentFile ?: File(".")
-						val file = /*core.codePath?.let { File(it) } ?:*/ codeFileFor(core)
+						val file = codeFileFor(core)
 						file.writeText(text)
 						core.codePath = base.toPath().relativize(file.toPath()).toString().replace('\\', '/')
 						markDirty()
@@ -1238,8 +1244,20 @@ class MainApp : Application() {
 
 
 	private fun codeFileFor(b: CoreBlock): File {
-		val dir =
-			File(currentProjectFile?.parentFile, "${currentProjectFile!!.nameWithoutExtension}_resources").apply { mkdirs() }
+		if (currentProjectFile == null) {
+			val fc = FileChooser().apply {
+				title = "Сохранить проект"
+				extensionFilters += FileChooser.ExtensionFilter("JSON Files", "*.json")
+			}
+			val project = collectCoreProject()
+			fc.showSaveDialog(stage)?.let { f ->
+				projectRepo.saveProject(f, project)
+				currentProjectFile = f
+			}
+		}
+		val parentFile = currentProjectFile?.parentFile
+		val nameWithoutExtension = currentProjectFile?.nameWithoutExtension
+		val dir = File(parentFile, "${nameWithoutExtension}_resources").apply { mkdirs() }
 		val base = b.id.also { b.id = it }
 		val ext = when (b.type) {
 			BlockType.MAPPING_GROOVY -> "groovy"

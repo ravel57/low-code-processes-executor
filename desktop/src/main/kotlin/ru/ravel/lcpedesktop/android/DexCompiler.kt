@@ -43,8 +43,12 @@ object DexCompiler {
 					while (entries.hasMoreElements()) {
 						val entry = entries.nextElement()
 						val name = entry.name
-						if (name.equals("META-INF/MANIFEST.MF", ignoreCase = true)) continue
-						if (name.startsWith("META-INF/")) {
+						if (name.equals("META-INF/MANIFEST.MF", ignoreCase = true)) {
+							continue
+						}
+						val skip = name.matches(Regex("""META-INF/.*\.(SF|RSA|DSA)""")) ||
+								name.startsWith("META-INF/maven/")
+						if (skip) {
 							continue
 						}
 						if (addedEntries.contains(name)) {
@@ -70,7 +74,7 @@ object DexCompiler {
 				jos.closeEntry()
 			}
 			jos.putNextEntry(JarEntry("META-INF/services/org.codehaus.groovy.vmplugin.VMPluginFactory"))
-			val plugin = "org.codehaus.groovy.vmplugin.v9.Java9\n"
+			val plugin = "org.codehaus.groovy.vmplugin.v8.Java8\n"
 			jos.write(plugin.toByteArray(Charsets.UTF_8))
 			jos.closeEntry()
 		}
@@ -105,30 +109,44 @@ object DexCompiler {
 
 		outputDexJar.parentFile?.mkdirs()
 		ZipOutputStream(outputDexJar.outputStream()).use { zos ->
-			// 1) classes.dex
-			zos.putNextEntry(ZipEntry("classes.dex"))
-			classesDex.inputStream().use { it.copyTo(zos) }
-			zos.closeEntry()
-			// ресурсы из groovy-runtime-res.jar
-			val resourcesJar = File("scripts/groovy-runtime-res.jar")
-			if (resourcesJar.exists()) {
-				ZipFile(resourcesJar).use { zf ->
-					for (entry in zf.entries()) {
-						if (entry.isDirectory || entry.name == "classes.dex") {
-							continue
-						}
-						zos.putNextEntry(ZipEntry(entry.name))
-						zf.getInputStream(entry).use { it.copyTo(zos) }
-						zos.closeEntry()
+			val written = mutableSetOf<String>()
+			fun put(name: String, bytes: ByteArray) {
+				if (!written.add(name)) return
+				zos.putNextEntry(ZipEntry(name))
+				zos.write(bytes); zos.closeEntry()
+			}
+			put("classes.dex", classesDex.readBytes())
+			fun copyMeta(fromJar: File) {
+				if (!fromJar.exists()) return
+				JarFile(fromJar).use { jf ->
+					val keepPrefixes = listOf("META-INF/dgm/", "META-INF/groovy/")
+					val keepFiles = setOf(
+						"META-INF/dgminfo",
+						"META-INF/services/org.codehaus.groovy.runtime.ExtensionModule",
+						"META-INF/services/org.codehaus.groovy.vmplugin.VMPluginFactory",
+						"META-INF/services/org.codehaus.groovy.vmplugin.VMPlugin",
+						"META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule",
+						"META-INF/groovy/org.codehaus.groovy.source.Extensions",
+						"META-INF/groovy-release-info.properties"
+					)
+					val e = jf.entries()
+					while (e.hasMoreElements()) {
+						val en = e.nextElement(); val n = en.name
+						val sig = n.endsWith(".SF") || n.endsWith(".RSA") || n.endsWith(".DSA")
+						val keep = keepPrefixes.any { n.startsWith(it) } || n in keepFiles
+						if (en.isDirectory || n == "classes.dex" || sig || !keep) continue
+						jf.getInputStream(en).use { put(n, it.readBytes()) }
 					}
 				}
 			}
-			// хардкод VMPluginFactory, если нет
-			val servicePath = "META-INF/services/org.codehaus.groovy.vmplugin.VMPluginFactory"
-			zos.putNextEntry(ZipEntry(servicePath))
-			zos.write("org.codehaus.groovy.vmplugin.v8.Java8\n".toByteArray())
-			zos.closeEntry()
+			copyMeta(combinedJar)
+			put(
+				"META-INF/services/org.codehaus.groovy.vmplugin.VMPluginFactory",
+				"org.codehaus.groovy.vmplugin.v8.Java8\n".toByteArray()
+			)
 		}
+
+
 		println("DEX JAR создан: ${outputDexJar.absolutePath} (size=${outputDexJar.length()} байт)")
 	}
 

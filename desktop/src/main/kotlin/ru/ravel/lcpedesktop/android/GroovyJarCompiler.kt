@@ -24,7 +24,7 @@ object GroovyJarCompiler {
 
 		val config = CompilerConfiguration().apply {
 			targetDirectory = File("build/tmp/groovy-classes")
-			targetBytecode = "11"
+			targetBytecode = "8"
 			optimizationOptions["indy"] = false
 		}
 		val gcl = GroovyClassLoader(this::class.java.classLoader, config)
@@ -78,9 +78,11 @@ object GroovyJarCompiler {
 	        |package ru.ravel.scripts
 	        |
 	        |@GrabConfig(initContextClass=false)
-	        |import groovy.transform.CompileStatic
+	        |import groovy.transform.CompileDynamic
 	        |$imports
+			|
 	        |class $className {
+	        |    @CompileDynamic
 	        |    static Map<String,Object> run(Map<String,Object> inputs) {
 	        |        $inputDecls
 	        |        $outputDecls
