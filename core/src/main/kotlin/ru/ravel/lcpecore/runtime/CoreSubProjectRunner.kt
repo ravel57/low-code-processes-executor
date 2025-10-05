@@ -12,6 +12,8 @@ class CoreSubProjectRunner(
 	private val groovy: GroovyExecutor?,
 	private val python: PythonExecutor?,
 	private val js: JsExecutor?,
+	/** Пробрасываем FormListener внутрь саб-раннера, чтобы FORM работал и в подпроектах */
+	private val formListener: EngineRunner.FormListener? = null,
 ) : SubProjectRunner {
 
 	override fun run(parentBlock: CoreBlock, outerProject: CoreProject): List<MutableMap<String, Any?>> {
@@ -37,7 +39,9 @@ class CoreSubProjectRunner(
 
 		// 1) Абсолютизируем пути внутри подпроекта
 		sub.blocks.forEach { b ->
-			b.codePath = b.codePath?.takeIf { it.isNotBlank() }?.let { absolutize(baseDir, it) }
+			b.codePath = b.codePath?.takeIf { it.isNotBlank() }?.let { rel ->
+				File(baseDir, rel.removePrefix("/")).normalize().absolutePath
+			}
 			b.subProjectPath = b.subProjectPath.takeIf { it.isNotBlank() }?.let { absolutize(baseDir, it) } ?: ""
 		}
 
@@ -93,12 +97,13 @@ class CoreSubProjectRunner(
 			putOut(target, outIndex, value)
 		}
 
-		// 4) Запускаем подпроект через EngineRunner
+		// 4) Запускаем подпроект через EngineRunner (с тем же formListener!)
 		val runner = EngineRunner(
 			groovy = groovy,
 			python = python,
 			js = js,
-			subProjectRunner = this
+			subProjectRunner = this,
+			formListener = formListener
 		)
 		runner.run(sub)
 
@@ -136,8 +141,12 @@ class CoreSubProjectRunner(
 	}
 
 	private fun absolutize(base: File, p: String): String =
-		File(p).let {
-			if (it.isAbsolute) it else File(base, p)
+		File(if (p.startsWith("/")) p.substring(1) else p).let { rel ->
+			if (rel.isAbsolute) {
+				rel
+			} else {
+				File(base, rel.path)
+			}
 		}.absolutePath
 
 	private fun CoreBlock.indexOfInput(id: UUID): Int =

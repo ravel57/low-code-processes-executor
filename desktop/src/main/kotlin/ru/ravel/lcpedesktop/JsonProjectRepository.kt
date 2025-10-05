@@ -33,7 +33,7 @@ class JsonProjectRepository : ProjectRepository {
 	override fun loadProject(absFile: File): CoreProject {
 		val coreProject = mapper.readValue(absFile, CoreProject::class.java)
 		coreProject.blocks
-			.filter { it.type == BlockType.SUB_PROJECT }
+			.filter { it.type == BlockType.SUB_PROCESS }
 			.onEach { block ->
 				val codeFile = File("${absFile.parentFile}/${block.codePath}")
 				if (codeFile.exists() && codeFile.isFile) {

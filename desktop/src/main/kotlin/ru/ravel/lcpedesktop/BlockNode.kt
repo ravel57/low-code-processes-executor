@@ -147,8 +147,8 @@ class BlockNode(
 		this.onMousePressed = EventHandler { e ->
 			if (e.button == MouseButton.SECONDARY) {
 				val menu = ContextMenu()
-				if (core.type == BlockType.SUB_PROJECT) {
-					menu.items += MenuItem("Открыть подпроект").apply {
+				if (core.type == BlockType.SUB_PROCESS) {
+					menu.items += MenuItem("Открыть подпроцесс").apply {
 						setOnAction {
 							core.subProjectPath.let { path ->
 								val app = (scene?.window?.userData as? MainApp)
@@ -157,7 +157,7 @@ class BlockNode(
 									callbacks.onOpenSubProject(file)
 								} else {
 									Alert(Alert.AlertType.WARNING).apply {
-										title = "Подпроект"
+										title = "Подпроцесс"
 										headerText = "Файл не найден"
 										contentText = path
 									}.showAndWait()
@@ -255,15 +255,9 @@ class BlockNode(
 
 		fun makeSubProjectPropsTab(): Tab? {
 			val path = core.subProjectPath
-			val projectFile = File(path).let {
-				if (it.isAbsolute) it
-				else {
-					val base = (scene.window.userData as? MainApp)
-						?.currentProjectFile?.parentFile
-						?: File(".")
-					File(base, path)
-				}
-			}.normalize()
+			val app = (scene?.window?.userData as? MainApp)
+			val projectFile = (app?.resolveProjectFile(path)
+				?: File(path)).normalize()
 			if (!projectFile.exists()) {
 				return null
 			}
@@ -301,7 +295,18 @@ class BlockNode(
 			val codePathStr = selected.get("codeFile")?.asText()
 			val defaults: Map<String, Any?> = try {
 				if (codePathStr != null) {
-					val file = File(codePathStr).let { if (it.isAbsolute) it else File(baseDir, codePathStr) }
+					val s = if (codePathStr.startsWith("/")) {
+						codePathStr.substring(1)
+					} else {
+						codePathStr
+					}
+					val file = File(s).let {
+						if (it.isAbsolute) {
+							it
+						} else {
+							File(baseDir, s)
+						}
+					}
 					if (file.exists()) {
 						mapper.readValue(file, Map::class.java) as Map<String, Any?>
 					} else {
@@ -370,26 +375,39 @@ class BlockNode(
 					else -> emptyList()
 				}
 
+				fun addPropRow(initialKey: String = "prop${rows.children.size}", initialValue: String = "") {
+					val tfKey = TextField(initialKey)
+					val tfVal = TextField(initialValue)
+					lateinit var row: HBox
+					val delBtn = Button("–").apply {
+						setOnAction { if (rows.children.size > 1) rows.children.remove(row) }
+					}
+					row = HBox(8.0, tfKey, tfVal, delBtn).apply { alignment = Pos.CENTER_LEFT }
+					rows.children += row
+				}
+
 				names.forEachIndexed { idx, name ->
 					val value = core.outputsData.getOrNull(idx)?.get(name)?.toString()
 						?: (core.subProjectProps[name] as? String)
 						?: ""
-					val tfKey = TextField(name)
-					val tfVal = TextField(value)
-					rows.children += HBox(8.0, tfKey, tfVal).apply { alignment = Pos.CENTER_LEFT }
+					addPropRow(name, value)
 				}
 				if (rows.children.isEmpty()) {
-					rows.children += HBox(8.0, TextField("prop0"), TextField(""))
-						.apply { alignment = Pos.CENTER_LEFT }
+					addPropRow("prop0", "")
 				}
 
-				TabPane(
-					Tab("Свойства", ScrollPane(rows).apply { isFitToWidth = true; prefHeight = 240.0 })
-						.apply { isClosable = false }
-				)
+				val addBtn = Button("+").apply { setOnAction { addPropRow() } }
+				val header = HBox(8.0, Label("Свойства:"), addBtn).apply { alignment = Pos.CENTER_LEFT }
+
+				val propsTab = Tab(
+					"Свойства", VBox(6.0, header,
+						ScrollPane(rows).apply { isFitToWidth = true; prefHeight = 240.0 })
+				).apply { isClosable = false }
+
+				TabPane(propsTab)
 			}
 
-			BlockType.SUB_PROJECT -> {
+			BlockType.SUB_PROCESS -> {
 				val tabPane = TabPane()
 				makeSubProjectPropsTab()?.let { tabPane.tabs += it }
 				tabPane
@@ -417,28 +435,32 @@ class BlockNode(
 				if (core.type == BlockType.PROPERTIES) {
 					val tab = tabs?.tabs?.firstOrNull { it.text == "Свойства" }
 					if (tab != null) {
-						val vbox = ((tab.content as ScrollPane).content as VBox)
-						val newProps = mutableListOf<String>()
-						val newData = mutableListOf<MutableMap<String, Any?>>()
-						vbox.children.forEachIndexed { idx, row ->
-							val box = row as HBox
-							val tfKey = box.children[0] as TextField
-							val tfVal = box.children[1] as TextField
-							val key = tfKey.text.ifBlank { "prop$idx" }
-							newProps += key
-							newData += mutableMapOf(key to tfVal.text)
+						val rows: VBox? = when (val content = tab.content) {
+							is ScrollPane -> content.content as? VBox
+							is VBox -> (content.children.getOrNull(1) as? ScrollPane)?.content as? VBox
+							else -> null
 						}
-						core.outputNames = newProps.toMutableList()
-						core.outputCount = newProps.size
-						core.outputsData = newData.toMutableList()
+						rows?.let { vbox ->
+							val newProps = mutableListOf<String>()
+							val newData = mutableListOf<MutableMap<String, Any?>>()
+							vbox.children.forEachIndexed { idx, row ->
+								val box = row as HBox
+								val tfKey = box.children[0] as TextField
+								val tfVal = box.children[1] as TextField
+								val key = tfKey.text.ifBlank { "prop$idx" }
+								newProps += key
+								newData += mutableMapOf(key to tfVal.text)
+							}
+							core.outputNames = newProps.toMutableList()
+							core.outputCount = newProps.size
+							core.outputsData = newData.toMutableList()
 
-						val mapForFile = core.outputsData
-							.mapNotNull { it.entries.firstOrNull()?.let { e -> e.key to e.value } }
-							.toMap()
-						val json = ObjectMapper()
-							.writerWithDefaultPrettyPrinter()
-							.writeValueAsString(mapForFile)
-						saveCode(core, json)   // сохраняем туда же, куда читали
+							val mapForFile = core.outputsData
+								.mapNotNull { it.entries.firstOrNull()?.let { e -> e.key to e.value } }
+								.toMap()
+							val json = ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(mapForFile)
+							saveCode(core, json)
+						}
 					}
 				}
 				tabs?.tabs?.firstOrNull { it.text == "I/O" }?.let { ioTab ->

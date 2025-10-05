@@ -333,16 +333,15 @@ class MainApp : Application() {
 					val item = MenuItem(type.displayName)
 					item.setOnAction {
 						when (type) {
-							BlockType.SUB_PROJECT -> {
+							BlockType.SUB_PROCESS -> {
 								val fc = FileChooser().apply {
-									title = "Выберите проект"
+									title = "Выберите процесс"
 									extensionFilters += FileChooser.ExtensionFilter("JSON", "*.json")
 								}
 								fc.showOpenDialog(primaryStage)?.let { file ->
 									val node = addBlock(event.x, event.y, file.nameWithoutExtension, type)
 									val base = currentProjectFile?.parentFile ?: File(".")
-									node.core.subProjectPath = base.toPath().relativize(file.toPath()).toString()
-										.replace('\\', '/')
+									node.core.subProjectPath = storeRel(base, file)
 									adjustSubProjectNodeIO(node, file)
 								}
 							}
@@ -364,7 +363,7 @@ class MainApp : Application() {
 			contentPane.requestFocus()
 		}
 
-		val newBtn = Button("Новый проект").apply {
+		val newBtn = Button("Новый процесс").apply {
 			setOnAction {
 				if (!confirmSaveIfDirty()) {
 					return@setOnAction
@@ -377,11 +376,11 @@ class MainApp : Application() {
 				updateTitle()
 			}
 		}
-		val openBtn = Button("Открыть проект").apply {
+		val openBtn = Button("Открыть процесс").apply {
 			setOnAction {
 				if (!confirmSaveIfDirty()) return@setOnAction
 				val fc = FileChooser().apply {
-					title = "Открыть проект"
+					title = "Открыть процесс"
 					extensionFilters += FileChooser.ExtensionFilter("JSON", "*.json")
 				}
 				fc.showOpenDialog(stage)?.let { f ->
@@ -397,14 +396,14 @@ class MainApp : Application() {
 				}
 			}
 		}
-		val saveBtn = Button("Сохранить проект").apply {
+		val saveBtn = Button("Сохранить процесс").apply {
 			setOnAction {
 				val project = collectCoreProject()
 				if (currentProjectFile != null) {
 					projectRepo.saveProject(currentProjectFile!!, project)
 				} else {
 					val fc = FileChooser().apply {
-						title = "Сохранить проект"
+						title = "Сохранить процесс"
 						extensionFilters += FileChooser.ExtensionFilter("JSON Files", "*.json")
 					}
 					fc.showSaveDialog(primaryStage)?.let { f ->
@@ -463,27 +462,34 @@ class MainApp : Application() {
 				}
 				val all = collectAllBlocksWithFile(currentProjectFile ?: return@setOnAction)
 				val groovyBlocks = all.filter { it.block.type == BlockType.MAPPING_GROOVY }
-				groovyBlocks.forEach { (ownerFile, coreBlock) ->
-					val code = coreBlock.codeAbsolutePath?.takeIf { it.exists() }?.readText() ?: return@forEach
-					GroovyJarCompiler.compileToJar(
-						script = code,
-						block = coreBlock,
-						outputDir = outputDir,
-					)
+				groovyBlocks.forEach { (_, b) ->
+					if (b.groovyClassName.isNullOrBlank()) {
+						b.groovyClassName = "ru.ravel.scripts.GroovyBlock_${b.id.toString().replace("-", "")}"
+					}
+					b.codeAbsolutePath
+						?.takeIf { it.exists() }
+						?.readText()
+						?.let { code -> GroovyJarCompiler.compileToJar(script = code, block = b, outputDir = outputDir) }
 				}
 				all.groupBy { it.file }.forEach { (file, list) ->
 					val proj = projectRepo.loadProject(file).apply { baseDir = file.parentFile }
 					val byId = proj.blocks.associateBy { it.id }
-					list.forEach { loc ->
-						byId[loc.block.id]?.groovyClassName = loc.block.groovyClassName
-					}
+
+					list.asSequence()
+						.filter { it.block.type == BlockType.MAPPING_GROOVY }
+						.mapNotNull { loc ->
+							loc.block.groovyClassName?.takeIf { it.isNotBlank() }?.let { name -> loc.block.id to name }
+						}
+						.forEach { (id, name) ->
+							byId[id]?.groovyClassName = name
+						}
+
 					projectRepo.saveProject(file, proj)
 				}
 				val mergedJar = File(outputDir, "all-blocks.jar")
 				val dexFile = File(outputDir, "groovy-blocks-dex.jar")
 				DexCompiler.mergeAllBlockJars(mergedJar, outputDir)
 				DexCompiler.jarToDexJar(mergedJar, dexFile)
-				currentProjectFile?.let { projectRepo.saveProject(it, collectCoreProject()) }
 				Alert(Alert.AlertType.INFORMATION).apply {
 					title = "Сборка завершена"
 					headerText = "Файл dex создан"
@@ -702,28 +708,27 @@ class MainApp : Application() {
 			core = core,
 			x = x,
 			y = y,
-			loadCode = { b -> b.codePath?.let { File(it).takeIf(File::exists)?.readText() } ?: "" },
+			loadCode = { b ->
+				val base = currentProjectFile?.parentFile ?: File(".")
+				b.codePath?.let { p -> resolveStored(base, p).takeIf(File::exists)?.readText() } ?: ""
+			},
 			saveCode = { b, text ->
+				val base = currentProjectFile?.parentFile ?: File(".")
 				val file = if (b.type == BlockType.INPUT_DATA) {
 					val desiredExt = when (b.inputFormat) {
 						InputFormatType.JSON -> "json"
-						InputFormatType.XML -> "xml"
+						InputFormatType.XML  -> "xml"
 						InputFormatType.YAML -> "yaml"
 						else -> "txt"
 					}
-					val current = b.codePath?.let { File(it) }
+					val current = b.codePath?.let { resolveStored(base, it) }
 					val needNew = current == null || !current.name.endsWith(".$desiredExt", ignoreCase = true)
-					if (needNew) {
-						codeFileFor(b)
-					} else {
-						current!!
-					}
+					if (needNew) codeFileFor(b) else current!!
 				} else {
-					b.codePath?.let { File(it) } ?: codeFileFor(b)
+					b.codePath?.let { resolveStored(base, it) } ?: codeFileFor(b)
 				}
-
 				file.writeText(text)
-				b.codePath = file.absolutePath
+				b.codePath = storeRel(base, file)
 				markDirty()
 			},
 			callbacks = callbacks,
@@ -1084,7 +1089,7 @@ class MainApp : Application() {
 					},
 					callbacks = callbacks,
 				)
-				if (b.core.type == BlockType.SUB_PROJECT && b.core.subProjectPath.isNotBlank()) {
+				if (b.core.type == BlockType.SUB_PROCESS && b.core.subProjectPath.isNotBlank()) {
 					val f = resolveProjectFile(b.core.subProjectPath)
 					if (f.exists()) adjustSubProjectNodeIO(b, f)
 				}
@@ -1206,9 +1211,9 @@ class MainApp : Application() {
 		val dont = ButtonType("Не сохранять", ButtonBar.ButtonData.NO)
 		val cancel = ButtonType.CANCEL
 		val alert = Alert(Alert.AlertType.CONFIRMATION).apply {
-			title = "Проект изменён"
+			title = "Процесс изменён"
 			headerText = "Сохранить изменения?"
-			contentText = currentProjectFile?.name ?: "Новый проект"
+			contentText = currentProjectFile?.name ?: "Новый процесс"
 			buttonTypes.setAll(save, dont, cancel)
 		}
 		return when (alert.showAndWait().orElse(cancel)) {
@@ -1218,7 +1223,7 @@ class MainApp : Application() {
 					projectRepo.saveProject(currentProjectFile!!, project)
 				} else {
 					val fc = FileChooser().apply {
-						title = "Сохранить проект"
+						title = "Сохранить процесс"
 						extensionFilters += FileChooser.ExtensionFilter("JSON Files", "*.json")
 					}
 					val f = fc.showSaveDialog(stage) ?: return false
@@ -1246,7 +1251,7 @@ class MainApp : Application() {
 	private fun codeFileFor(b: CoreBlock): File {
 		if (currentProjectFile == null) {
 			val fc = FileChooser().apply {
-				title = "Сохранить проект"
+				title = "Сохранить процесс"
 				extensionFilters += FileChooser.ExtensionFilter("JSON Files", "*.json")
 			}
 			val project = collectCoreProject()
@@ -1320,7 +1325,7 @@ class MainApp : Application() {
 		} catch (e: Exception) {
 			Alert(Alert.AlertType.WARNING).apply {
 				title = "SUB_PROJECT"
-				headerText = "Не удалось прочитать структуру подпроекта"
+				headerText = "Не удалось прочитать структуру подпроцесса"
 				contentText = e.localizedMessage
 			}.showAndWait()
 		}
@@ -1370,7 +1375,7 @@ class MainApp : Application() {
 		val typeRef = object : TypeReference<Map<String, List<Map<String, Any>>>>() {}
 		val outputsMap = ObjectMapper().readValue(latestFile, typeRef)
 		blocks.forEach { block ->
-			if (block.core.type in arrayOf(BlockType.PROPERTIES, BlockType.SUB_PROJECT)) return@forEach
+			if (block.core.type in arrayOf(BlockType.PROPERTIES, BlockType.SUB_PROCESS)) return@forEach
 			outputsMap[block.core.id.toString()]?.let { list ->
 				block.core.outputsData = list.map { it.toMutableMap() }.toMutableList() as MutableList<MutableMap<String, Any?>>
 			}
@@ -1446,12 +1451,14 @@ class MainApp : Application() {
 		val acc = mutableListOf<BlockLoc>()
 
 		project.blocks.forEach { b ->
-			b.codeAbsolutePath = b.codePath?.let { File(projectFile.parent, it) }
+			b.codeAbsolutePath = b.codePath?.let { p ->
+				resolveStored(projectFile.parentFile, p)
+			}
 			acc.add(BlockLoc(thisFile, b))
 		}
 		project.blocks.forEach { b ->
 			if (b.subProjectPath.isNotBlank()) {
-				val subFile = File(projectFile.parentFile, b.subProjectPath).normalize()
+				val subFile = resolveStored(projectFile.parentFile, b.subProjectPath)
 				if (subFile.exists()) {
 					acc += collectAllBlocksWithFile(subFile, visited)
 				}
@@ -1463,7 +1470,38 @@ class MainApp : Application() {
 
 	fun resolveProjectFile(path: String): File {
 		val base = currentProjectFile?.parentFile ?: File(".")
-		return File(path).let { if (it.isAbsolute) it else File(base, path) }.normalize()
+		return resolveStored(base, path)
+	}
+
+
+	/** Сериализация: относительный путь с ведущим '/' и слешами '/' */
+	private fun storeRel(base: File, file: File): String {
+		val baseAbs = base.toPath().toAbsolutePath().normalize()
+		val fileAbs = file.toPath().toAbsolutePath().normalize()
+		val stored = try {
+			if (baseAbs.root != fileAbs.root) {
+				fileAbs.toString().replace('\\', '/')
+			} else {
+				val rel = baseAbs.relativize(fileAbs).toString()
+					.replace('\\', '/')
+					.removePrefix("./")
+				if (rel.startsWith("/")) rel else "/$rel"
+			}
+		} catch (_: IllegalArgumentException) {
+			fileAbs.toString().replace('\\', '/')
+		}
+		return stored
+	}
+
+	/** Десериализация: трактуем ведущий '/' как наш «относительный» префикс */
+	private fun resolveStored(base: File, stored: String): File {
+		val s = if (stored.startsWith("/")) stored.substring(1) else stored
+		val f = File(s)
+		return if (f.isAbsolute) {
+			f.normalize()
+		} else {
+			File(base, s).normalize()
+		}
 	}
 
 

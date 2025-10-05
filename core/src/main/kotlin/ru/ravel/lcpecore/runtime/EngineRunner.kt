@@ -1,100 +1,246 @@
 package ru.ravel.lcpecore.runtime
 
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import kotlinx.coroutines.*
-import ru.ravel.lcpecore.model.ExecutionListener
-import ru.ravel.lcpecore.model.BlockType
-import ru.ravel.lcpecore.model.CoreBlock
-import ru.ravel.lcpecore.model.CoreProject
-import ru.ravel.lcpecore.util.DataUtils
+import ru.ravel.lcpecore.graph.CycleDetector
+import ru.ravel.lcpecore.model.*
 import java.io.File
+import java.math.BigDecimal
+import java.math.BigInteger
+import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.collections.List
-import kotlin.collections.Map
-import kotlin.collections.MutableList
-import kotlin.collections.MutableMap
-import kotlin.collections.associateBy
-import kotlin.collections.filter
-import kotlin.collections.getOrNull
-import kotlin.collections.getValue
-import kotlin.collections.mutableListOf
-import kotlin.collections.mutableMapOf
-import kotlin.collections.mutableSetOf
-import kotlin.collections.orEmpty
-import kotlin.collections.set
-import kotlin.collections.sortedBy
-import kotlin.collections.toMutableMap
+import kotlin.collections.*
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class EngineRunner(
-	private val groovy: GroovyExecutor?,          // можно передать null, если язык не используется
-	private val python: PythonExecutor?,          // см. комментарии в MAPPING_PYTHON
-	private val js: JsExecutor?,                  // см. комментарии в MAPPING_JAVA_SCRIPT
+	private val groovy: GroovyExecutor?,
+	private val python: PythonExecutor?,
+	private val js: JsExecutor?,
 	private val subProjectRunner: SubProjectRunner,
 	private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 	private val listeners: List<ExecutionListener> = emptyList(),
+	/** Слушатель форм: сообщаем на Android, что нужна форма, и ждём submit */
+	private val formListener: FormListener? = null,
 ) {
 
-	/** Запуск всего проекта (DAG + возможные циклы — «мягкая» схема с фазами) */
+	/** Внутренний реестр «ожиданий» по FORM: blockId -> обещание с данными submit */
+	private val formWaiters = ConcurrentHashMap<UUID, CompletableDeferred<Map<String, Any?>>>()
+	private val activeForms = AtomicInteger(0)
+	private val breakPhaseAfterForm = AtomicBoolean(false)
+	private val formSlot = AtomicBoolean(false)
+	/** Версия (эпоха) текущей фазы*/
+	private val globalPhaseEpoch = java.util.concurrent.atomic.AtomicLong(0L)
+	/** Когда (в какой фазе) был произведён конкретный выход (blockId, outIdx)*/
+	private val outEpoch = java.util.concurrent.ConcurrentHashMap<Pair<java.util.UUID, Int>, Long>()
+
+
+	private fun formPauseOn() {
+		activeForms.incrementAndGet()
+	}
+
+
+	private fun formPauseOff() {
+		activeForms.decrementAndGet()
+	}
+
+
+	private fun formSlotOff() {
+		formSlot.set(false)
+	}
+
+
+	private fun formPaused(): Boolean {
+		return activeForms.get() > 0
+	}
+
+
+	/** Внешняя точка возобновления: Android вызывает на submit */
+	fun submitForm(blockId: UUID, values: Map<String, Any?>) {
+		formWaiters.remove(blockId)?.complete(values)
+	}
+
+	/** Событие для UI формы */
+	interface FormListener {
+		/**
+		 * Вызывается когда движок дошёл до FORM и собирается ждать submit.
+		 * @param block сам блок
+		 * @param specJson содержимое block.codePath (JSON-спека формы)
+		 * @param initial начальные значения (мердж входов и дефолтов)
+		 */
+		fun onFormRequested(block: CoreBlock, specJson: String, initial: Map<String, Any?>)
+	}
+
+	/** Запуск всего проекта */
 	fun run(project: CoreProject) {
-		runPhase(project, exclude = emptySet())
-		val cycle = CycleDetector.findFirstCycle(project)
-		if (!cycle.isNullOrEmpty()) {
-			while (true) {
-				var progressed = false
-				for (b in cycle) {
-					val oldOutputs = b.outputsData.map { it.toMap().toMutableMap() } // снимок
-					listeners.forEach { it.onStart(b) }
-					try {
-						runBlock(b, project)
-						val changed = DataUtils.outputsChanged(oldOutputs, b.outputsData)
-						if (changed) {
-							progressed = true
-						}
-						listeners.forEach { it.onOutput(b, mapOf("outputs" to b.outputsData)) }
-					} catch (t: Throwable) {
-						listeners.forEach { it.onError(b, t) }
-						throw t
-					} finally {
-						listeners.forEach { it.onFinish(b) }
-					}
-				}
-				if (!progressed) {
-					break
-				}
+		// Сброс старых выходов
+		project.blocks.forEach { b ->
+			if (!b.type.isService() && b.type != BlockType.PROPERTIES) {
+				b.outputsData = MutableList(b.outputCount) { mutableMapOf() }
 			}
-			runPhase(project, exclude = emptySet())
+		}
+
+		val raw = CycleDetector.findFirstCycle(project)
+
+		runPhase(project, exclude = emptySet(), eagerForms = true)
+		var endedByForm = breakPhaseAfterForm.getAndSet(false)
+		if (raw == null) {
+			while (endedByForm) {
+				runPhase(project, exclude = emptySet(), eagerForms = false)
+				endedByForm = breakPhaseAfterForm.getAndSet(false)
+			}
+			return
+		}
+		val cycleBlocks = raw.toSet()  //CycleDetector.filterCycleBlocks(raw).toSet()
+		val excludeOutside = project.blocks.filter { it !in cycleBlocks }.toSet()
+		while (true) {
+			runPhase(project, exclude = excludeOutside, eagerForms = false)
+			val ended = breakPhaseAfterForm.getAndSet(false)
+			if (cycleHasOutputsToOutside(project, cycleBlocks)) break
+			if (!ended && cycleInternalsDrained(project, cycleBlocks)) break
+			if (formPaused()) Thread.sleep(10)
+		}
+		runPhase(project, exclude = cycleBlocks, eagerForms = false)
+	}
+
+
+	/** Есть ли непустые выходы из цикловых блоков наружу (на блоки вне цикла) */
+	private fun cycleHasOutputsToOutside(project: CoreProject, cycle: Set<CoreBlock>): Boolean {
+		val byId = project.blocks.associateBy { it.id }
+		val cycleIds = cycle.map { it.id }.toSet()
+		return project.connections.any { c ->
+			c.fromId in cycleIds && c.toId !in cycleIds && run {
+				val src = byId.getValue(c.fromId)
+				val outIdx = src.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
+				val m = src.outputsData.getOrNull(outIdx)
+				m?.isNotEmpty() == true
+			}
 		}
 	}
 
-	/** Одна «фаза»: выполняем любые блоки, у которых все родители уже дали выходы */
-	private fun runPhase(project: CoreProject, exclude: Set<CoreBlock>) {
+
+	/**
+	 * Фаза исполнения.
+	 * Блок считается «готов», когда по всем его НЕОПЦИОНАЛЬНЫМ входящим рёбрам пришли непустые карты.
+	 * Опциональные рёбра передают данные, но не блокируют запуск.
+	 */
+	private fun runPhase(project: CoreProject, exclude: Set<CoreBlock>, eagerForms: Boolean) {
 		val byId = project.blocks.associateBy { it.id }
-		val incoming: Map<CoreBlock, List<CoreBlock>> = project.incomingIndex()
-		val outgoing = mutableMapOf<CoreBlock, MutableList<CoreBlock>>()
+		val candidates = project.blocks.filter { it !in exclude }.toSet()
+		if (candidates.isEmpty()) return
+
+		data class FormQEntry(val block: CoreBlock, val rank: Int, val ticket: Long)
+
+		// --- входящие рёбра ТОЛЬКО внутри множества кандидатов (для пробуждения детей и BFS)
+		val incomingRestricted: Map<CoreBlock, List<InEdge>> = candidates.associateWith { b ->
+			project.connections
+				.filter { it.toId == b.id }
+				.mapNotNull { c ->
+					val p = byId[c.fromId] ?: return@mapNotNull null
+					if (p !in candidates) return@mapNotNull null
+					val outIdx = p.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
+					InEdge(p, outIdx, c)
+				}
+		}
+
+		// --- входящие рёбра БЕЗ фильтра по кандидатам (для корректного подсчёта обязательных входов/готовности)
+		val allIncoming: Map<CoreBlock, List<InEdge>> = candidates.associateWith { b ->
+			project.connections
+				.filter { it.toId == b.id }
+				.mapNotNull { c ->
+					val p = byId[c.fromId] ?: return@mapNotNull null
+					val outIdx = p.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
+					InEdge(p, outIdx, c)
+				}
+		}
+
+		val outgoingEdges = mutableMapOf<CoreBlock, MutableList<OutEdge>>()
 		project.connections.forEach { c ->
 			val from = byId[c.fromId]
 			val to = byId[c.toId]
-			if (from != null && to != null) {
-				outgoing.computeIfAbsent(from) { mutableListOf() }.add(to)
+			if (from != null && to != null && from in candidates && to in candidates) {
+				val outIdx = from.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
+				outgoingEdges.computeIfAbsent(from) { mutableListOf() }.add(OutEdge(to, outIdx, c))
 			}
 		}
-		val candidates = project.blocks.filter { it !in exclude }.toSet()
-		if (candidates.isEmpty()) {
-			return
+
+		// кто получает входы ИЗВНЕ множества кандидатов (только по НЕопциональным рёбрам) — для якорей/ранга
+		val candidateIds = candidates.map { it.id }.toSet()
+		val hasIncomingFromOutside: Map<CoreBlock, Boolean> = candidates.associateWith { b ->
+			project.connections.any { c -> c.toId == b.id && c.fromId !in candidateIds && !c.isOptional }
 		}
-		val deps = ConcurrentHashMap<CoreBlock, AtomicInteger>()
-		val ready = ConcurrentLinkedQueue<CoreBlock>()
+
+		// --- очереди готовых
+		val readyForms = PriorityQueue(compareBy<FormQEntry> { it.rank }.thenBy { it.ticket })
+		val readyOthers = ConcurrentLinkedQueue<CoreBlock>()
+		val formTicket = AtomicLong(0)
+		val scheduled = ConcurrentHashMap.newKeySet<UUID>()  // чтобы не ставить блок в очередь дважды
+
+		// --- степень ожидания по НЕопциональным входам (считаем по ВСЕМ входам)
+		val pending = ConcurrentHashMap<CoreBlock, AtomicInteger>()
+		val requiredIncomingCount = candidates.associateWith { b ->
+			allIncoming[b].orEmpty().count { !it.conn.isOptional }
+		}
+
+		// якоря для ранжирования форм: нет обязательных входов, есть внешний вход, START/INPUT_DATA/PROPERTIES
+		val anchors: Set<CoreBlock> = candidates.filter { b ->
+			requiredIncomingCount[b] == 0 ||
+					hasIncomingFromOutside[b] == true ||
+					b.type == BlockType.START || b.type == BlockType.INPUT_DATA || b.type == BlockType.PROPERTIES
+		}.toSet()
+
+		// расстояние от якорей — для стабильного порядка показа форм
+		val dist = mutableMapOf<UUID, Int>()
+		val q: ArrayDeque<CoreBlock> = ArrayDeque()
+		anchors.forEach { a -> dist[a.id] = 0; q.add(a) }
+		while (q.isNotEmpty()) {
+			val u = q.removeFirst()
+			val du = dist[u.id]!!
+			outgoingEdges[u].orEmpty().forEach { e ->
+				if (e.child in candidates && dist.putIfAbsent(e.child.id, du + 1) == null) {
+					q.add(e.child)
+				}
+			}
+		}
+
+		fun formRank(b: CoreBlock): Int {
+			val d = dist[b.id] ?: if (hasIncomingFromOutside[b] == true) 0 else Int.MAX_VALUE / 2
+			return d * 100_000 + project.blocks.indexOf(b) // стабильный тай-брейкер
+		}
+
+		fun enqueueReady(b: CoreBlock) {
+			if (!scheduled.add(b.id)) return
+			if (b.type == BlockType.FORM) readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
+			else readyOthers.add(b)
+		}
+
+		// первичная инициализация ожиданий — по ВСЕМ входам; MAPPING_* по-прежнему можно запускать частично
 		candidates.forEach { b ->
-			val need = incoming[b].orEmpty().count { parent ->
-				parent in candidates && parent.outputsData.all { it.isEmpty() }
+			val inAll = allIncoming[b].orEmpty()
+			val requiredIn = inAll.filter { !it.conn.isOptional }
+
+			val emptyRequired = requiredIn.count { (p, idx) -> p.outputsData.getOrNull(idx).isNullOrEmpty() }
+			val hasAnyNonEmpty = inAll.any { (p, idx) -> !(p.outputsData.getOrNull(idx).isNullOrEmpty()) }
+
+			val allowPartial = b.type in setOf(
+				BlockType.MAPPING_GROOVY,
+				BlockType.MAPPING_PYTHON,
+				BlockType.MAPPING_JAVA_SCRIPT
+			)
+
+			val need = when {
+				allowPartial && hasAnyNonEmpty -> 0
+				b.type == BlockType.FORM && eagerForms && requiredIncomingCount[b] == 0 -> 0
+				else -> emptyRequired
 			}
-			deps[b] = AtomicInteger(need)
-			if (need == 0) ready.add(b)
+
+			pending[b] = AtomicInteger(need)
+			if (need == 0) enqueueReady(b)
 		}
-		if (ready.isEmpty()) {
-			return
-		}
+		if (readyForms.isEmpty() && readyOthers.isEmpty()) return
+
 		val inFlight = AtomicInteger(0)
 		val done = CompletableDeferred<Unit>()
 
@@ -106,37 +252,58 @@ class EngineRunner(
 					runBlock(block, project)
 					listeners.forEach { it.onOutput(block, mapOf("outputs" to block.outputsData)) }
 
-					// только теперь освобождаем потомков
-					outgoing[block].orEmpty().forEach { child ->
-						if (child in candidates) {
-							val left = deps[child]!!.decrementAndGet()
-							if (left == 0) ready.add(child)
+					// триггерим детей только внутри множества кандидатов
+					outgoingEdges[block].orEmpty().forEach { e ->
+						val nonEmpty = block.outputsData.getOrNull(e.outIdx)?.isNotEmpty() == true
+						if (!nonEmpty) return@forEach
+
+						if (!e.conn.isOptional) {
+							val left = pending[e.child]!!.decrementAndGet()
+							if (left == 0) enqueueReady(e.child)
+						} else {
+							if (pending[e.child]!!.get() == 0) enqueueReady(e.child)
 						}
 					}
 				} catch (t: Throwable) {
 					listeners.forEach { it.onError(block, t) }
 				} finally {
 					listeners.forEach { it.onFinish(block) }
-					if (inFlight.decrementAndGet() == 0 && ready.isEmpty()) {
+//					val noQueues = readyForms.isEmpty() && readyOthers.isEmpty()
+					val drainedOthers = readyOthers.isEmpty()
+					val noFormsAllowedOrPending = breakPhaseAfterForm.get() || readyForms.isEmpty()
+					if (inFlight.decrementAndGet() == 0 && drainedOthers && noFormsAllowedOrPending) {
 						done.complete(Unit)
 					}
 				}
 			}
 		}
 
-		while (true) {
-			ready.poll()?.let(::submit)
-				?: break
+		fun pumpReady() {
+			while (true) {
+				if (formPaused() || formSlot.get()) break
+				if (breakPhaseAfterForm.get()) {
+					val b = readyOthers.poll() ?: break
+					submit(b)
+					continue
+				}
+				val f = readyForms.poll()
+				if (f != null) {
+					formSlot.set(true)
+					submit(f.block)
+					break
+				}
+				val b = readyOthers.poll() ?: break
+				submit(b)
+			}
 		}
 
+		pumpReady()
+
 		scope.launch {
-			while (isActive && (inFlight.get() > 0 || ready.isNotEmpty())) {
-				var scheduled = false
-				while (true) {
-					submit(ready.poll() ?: break)
-					scheduled = true
-				}
-				if (!scheduled && inFlight.get() > 0) delay(5)
+			while (isActive && (inFlight.get() > 0 || !readyForms.isEmpty() || !readyOthers.isEmpty())) {
+				val before = inFlight.get()
+				pumpReady()
+				if (inFlight.get() == before && inFlight.get() > 0) delay(5)
 			}
 		}
 		runBlocking { done.await() }
@@ -144,8 +311,13 @@ class EngineRunner(
 
 
 	/** Исполнение одного блока */
-	private fun runBlock(block: CoreBlock, project: CoreProject) {
-		if (!block.type.isService()) {
+	private suspend fun runBlock(
+		block: CoreBlock,
+		project: CoreProject,
+		preserveOutputs: Boolean = false,
+	) {
+		val prev = block.outputsData.map { it.toMutableMap() }
+		if (!preserveOutputs && !block.type.isService() && block.type != BlockType.PROPERTIES) {
 			block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
 		}
 		try {
@@ -155,11 +327,23 @@ class EngineRunner(
 					val outputs = prepareOutputs(block)
 					val cls = block.groovyClassName?.trim().orEmpty()
 					val code = readCode(block, project)
+
 					val inout = inputs.toMutableMap().apply { putAll(outputs) }
-					val retAny = requireNotNull(groovy) { "GroovyExecutor is not provided" }.exec(code, inout, cls)
+					val retAny = requireNotNull(groovy) { "GroovyExecutor is not provided" }
+						.exec(code, inout, cls)
+
 					if (retAny is Map<*, *>) {
-						inout.putAll(retAny as Map<String, Any?>)
+						retAny.forEach { (k, v) ->
+							if (k is String) {
+								inout[k] = when (v) {
+									is MutableMap<*, *> -> (v as MutableMap<String, Any?>).toMutableMap()
+									is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
+									else -> mutableMapOf("value" to v)
+								}
+							}
+						}
 					}
+
 					block.outputNames.map { name ->
 						when (val v = inout[name]) {
 							is MutableMap<*, *> -> (v as MutableMap<String, Any?>).toMutableMap()
@@ -176,8 +360,7 @@ class EngineRunner(
 					val result = requireNotNull(python) { "PythonExecutor is not provided" }
 						.exec(block, inputs, outputs, block.packagesNames)
 					block.outputNames.map { name ->
-						val value = result[name]
-						when (value) {
+						when (val value = result[name]) {
 							is MutableMap<*, *> -> (value as MutableMap<String, Any?>).toMutableMap()
 							is Map<*, *> -> (value as Map<String, Any?>).toMutableMap()
 							null -> outputs[name]?.toMutableMap() ?: mutableMapOf()
@@ -239,15 +422,58 @@ class EngineRunner(
 					listOf(base)
 				}
 
-				BlockType.SUB_PROJECT -> {
+				BlockType.SUB_PROCESS -> {
 					subProjectRunner.run(block, project).toMutableList()
 				}
 
 				BlockType.PROPERTIES -> {
-					if (block.outputsData.isEmpty()) {
-						block.outputNames.map { mutableMapOf(it to "") }
+					val text = readCode(block, project).trim()
+					val defaults: Map<String, Any?> = if (text.isNotBlank()) {
+						jacksonObjectMapper().readValue(text, Map::class.java) as Map<String, Any?>
 					} else {
-						block.outputsData
+						emptyMap()
+					}
+					block.outputNames.mapIndexed { i, name ->
+						val userSet = prev.getOrNull(i)?.get(name)
+						val v = userSet ?: defaults[name] ?: ""
+						mutableMapOf(name to v)
+					}
+				}
+
+				BlockType.FORM -> {
+					val inputs = collectInputs(block, project)
+					val specJson = readCode(block, project)
+					val initial = inputs.toMutableMap()
+					formPauseOn()
+					val submitted = try {
+						awaitForm(block, specJson, initial)
+					} finally {
+						formPauseOff()
+						formSlotOff()
+						breakPhaseAfterForm.set(true)
+					}
+
+					when {
+						block.outputNames.isEmpty() -> {
+							listOf(submitted.toMutableMap())
+						}
+
+						submitted.keys.any { it in block.outputNames.toSet() } -> {
+							block.outputNames.map { name ->
+								when (val v = submitted[name]) {
+									is MutableMap<*, *> -> (v as MutableMap<String, Any?>).toMutableMap()
+									is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
+									null -> mutableMapOf() // если не пришло — пустой
+									else -> mutableMapOf("value" to v)
+								}
+							}
+						}
+
+						else -> {
+							val first = submitted.toMutableMap()
+							val rest = List((block.outputNames.size - 1).coerceAtLeast(0)) { mutableMapOf<String, Any?>() }
+							listOf(first) + rest
+						}
 					}
 				}
 
@@ -261,12 +487,26 @@ class EngineRunner(
 	}
 
 
-	private fun collectInputs(block: CoreBlock, project: CoreProject): MutableMap<String, Any?> {
-		val inputs = mutableMapOf<String, Any?>()
+	private suspend fun awaitForm(block: CoreBlock, specJson: String, initial: Map<String, Any?>): Map<String, Any?> {
+		val promise = CompletableDeferred<Map<String, Any?>>()
+		formWaiters[block.id] = promise
+		formListener?.onFormRequested(block, specJson, initial)
+		return try {
+			promise.await()
+		} finally {
+			formWaiters.remove(block.id)
+		}
+	}
+
+
+	/** Собрать входные карты для блока из подключений проекта */
+	private fun collectInputs(block: CoreBlock, project: CoreProject): Map<String, MutableMap<String, Any?>> {
+		val byId = project.blocks.associateBy { it.id }
+		val inputs = mutableMapOf<String, MutableMap<String, Any?>>()
 		project.connections
 			.filter { it.toId == block.id }
 			.forEach { conn ->
-				val fromBlock = project.blocks.firstOrNull { it.id == conn.fromId }
+				val fromBlock = byId[conn.fromId]
 				val fromOutIdx = fromBlock?.outputIds?.indexOf(conn.fromOutputId) ?: -1
 				val value = if (fromOutIdx >= 0) {
 					fromBlock?.outputsData?.getOrNull(fromOutIdx) ?: mutableMapOf()
@@ -285,8 +525,9 @@ class EngineRunner(
 	}
 
 
-	private fun prepareOutputs(block: CoreBlock): MutableMap<String, MutableMap<String, Any?>> =
-		block.outputNames.associateWith { mutableMapOf<String, Any?>() }.toMutableMap()
+	private fun prepareOutputs(block: CoreBlock): MutableMap<String, MutableMap<String, Any?>> {
+		return block.outputNames.associateWith { mutableMapOf<String, Any?>() }.toMutableMap()
+	}
 
 
 	private fun readCode(block: CoreBlock, project: CoreProject): String {
@@ -308,18 +549,58 @@ class EngineRunner(
 	}
 
 
-	/** Индекс входящих рёбер: для каждого блока — список «родителей» */
-	private fun CoreProject.incomingIndex(): Map<CoreBlock, List<CoreBlock>> {
-		val byId = blocks.associateBy { it.id }
-		val map = mutableMapOf<CoreBlock, MutableList<CoreBlock>>()
-		blocks.forEach { map[it] = mutableListOf() }
-		connections.forEach { c ->
-			val to = byId[c.toId]
-			val from = byId[c.fromId]
-			if (to != null && from != null) map.getValue(to).add(from)
-		}
-		return map
+	private fun normalizeMap(m: Map<String, Any?>, ignoreKeys: Set<String>): Map<String, Any?> {
+		return m.filterKeys { it !in ignoreKeys }
+			.mapValues { (_, v) -> normalizeValue(v, ignoreKeys) }
+			.toSortedMap()
 	}
+
+
+	@Suppress("UNCHECKED_CAST")
+	private fun normalizeValue(v: Any?, ignoreKeys: Set<String>): Any? = when (v) {
+		is Map<*, *> -> normalizeMap(v as Map<String, Any?>, ignoreKeys)
+		is List<*> -> v.map { normalizeValue(it, ignoreKeys) }
+		is Int, is Short, is Byte, is Long -> (v as Number).toLong()
+		is Float, is Double -> (v as Number).toDouble()
+		is BigInteger -> v.toLong()
+		is BigDecimal -> v.toDouble()
+		else -> v
+	}
+
+
+	private fun cycleInternalsDrained(project: CoreProject, cycle: Set<CoreBlock>): Boolean {
+		val byId = project.blocks.associateBy { it.id }
+		val ids = cycle.map { it.id }.toSet()
+		val internal = project.connections.filter { it.fromId in ids && it.toId in ids }
+		return internal.all { c ->
+			val src = byId.getValue(c.fromId)
+			val idx = src.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
+			val m = src.outputsData.getOrNull(idx)
+			m.isNullOrEmpty()
+		}
+	}
+
+
+	private data class EdgeKey(
+		val fromId: UUID,
+		val toId: UUID,
+		val fromOut: UUID,
+		val toIn: UUID,
+	)
+
+
+	private data class InEdge(
+		val parent: CoreBlock,
+		val outIdx: Int,
+		val conn: CoreConnection,
+	)
+
+
+	private data class OutEdge(
+		val child: CoreBlock,
+		val outIdx: Int,
+		val conn: CoreConnection,
+	)
 
 
 	class BlockExecutionException(blockName: String, cause: Throwable) :
