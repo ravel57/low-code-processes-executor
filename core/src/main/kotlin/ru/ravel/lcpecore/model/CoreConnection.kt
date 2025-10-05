@@ -21,4 +21,7 @@ data class CoreConnection @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) const
 
 	@JsonProperty("isOptional")
 	var isOptional: Boolean = false,
+
+	@JsonProperty("isNeedDataToRun")
+	var isNeedDataToRun: Boolean = false,
 )

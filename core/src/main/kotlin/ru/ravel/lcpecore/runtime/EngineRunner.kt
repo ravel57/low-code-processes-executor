@@ -24,6 +24,7 @@ class EngineRunner(
 	private val listeners: List<ExecutionListener> = emptyList(),
 	/** Слушатель форм: сообщаем на Android, что нужна форма, и ждём submit */
 	private val formListener: FormListener? = null,
+	private val maxParallelism: Int = 1,
 ) {
 
 	/** Внутренний реестр «ожиданий» по FORM: blockId -> обещание с данными submit */
@@ -31,11 +32,10 @@ class EngineRunner(
 	private val activeForms = AtomicInteger(0)
 	private val breakPhaseAfterForm = AtomicBoolean(false)
 	private val formSlot = AtomicBoolean(false)
-	/** Версия (эпоха) текущей фазы*/
-	private val globalPhaseEpoch = java.util.concurrent.atomic.AtomicLong(0L)
-	/** Когда (в какой фазе) был произведён конкретный выход (blockId, outIdx)*/
-	private val outEpoch = java.util.concurrent.ConcurrentHashMap<Pair<java.util.UUID, Int>, Long>()
 
+	private val formQueues = ConcurrentHashMap<UUID, ConcurrentLinkedQueue<Map<String, Any?>>>()
+	private val outputVersion = ConcurrentHashMap<UUID, MutableList<Long>>()
+	private val globalTick = AtomicLong(0)
 
 	private fun formPauseOn() {
 		activeForms.incrementAndGet()
@@ -59,8 +59,45 @@ class EngineRunner(
 
 	/** Внешняя точка возобновления: Android вызывает на submit */
 	fun submitForm(blockId: UUID, values: Map<String, Any?>) {
-		formWaiters.remove(blockId)?.complete(values)
+		val q = formQueues.computeIfAbsent(blockId) { ConcurrentLinkedQueue() }
+		q.add(values)
+		formWaiters.remove(blockId)?.let { waiter ->
+			q.poll()?.let { next ->
+				if (!waiter.isCompleted) waiter.complete(next)
+			}
+			if (q.isEmpty()) formQueues.remove(blockId)
+		}
 	}
+
+	private fun isEffectivelyEmptyMap(m: Map<String, Any?>?): Boolean {
+		if (m.isNullOrEmpty()) return true
+		fun emptyAny(v: Any?): Boolean = when (v) {
+			null -> true
+			is Map<*, *> -> v.isEmpty() || v.values.all { emptyAny(it) }
+			is Collection<*> -> v.isEmpty() || v.all { emptyAny(it) }
+			is String -> v.isEmpty()
+			else -> false
+		}
+		return m.values.all { emptyAny(it) }
+	}
+
+
+	@Suppress("UNCHECKED_CAST")
+	private fun deepCopyAny(v: Any?): Any? {
+		return when (v) {
+			is Map<*, *> -> (v as Map<String, Any?>).entries
+				.associate { (k, vv) -> k to deepCopyAny(vv) }
+				.toMutableMap()
+
+			is Collection<*> -> v.map { deepCopyAny(it) }.toMutableList()
+			else -> v
+		}
+	}
+
+	private fun deepCopyMap(m: Map<String, Any?>?): MutableMap<String, Any?> =
+		if (m == null) mutableMapOf() else deepCopyAny(m) as MutableMap<String, Any?>
+
+
 
 	/** Событие для UI формы */
 	interface FormListener {
@@ -115,7 +152,7 @@ class EngineRunner(
 				val src = byId.getValue(c.fromId)
 				val outIdx = src.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
 				val m = src.outputsData.getOrNull(outIdx)
-				m?.isNotEmpty() == true
+				!isEffectivelyEmptyMap(m)
 			}
 		}
 	}
@@ -221,8 +258,12 @@ class EngineRunner(
 			val inAll = allIncoming[b].orEmpty()
 			val requiredIn = inAll.filter { !it.conn.isOptional }
 
-			val emptyRequired = requiredIn.count { (p, idx) -> p.outputsData.getOrNull(idx).isNullOrEmpty() }
-			val hasAnyNonEmpty = inAll.any { (p, idx) -> !(p.outputsData.getOrNull(idx).isNullOrEmpty()) }
+			fun outEmpty(b: CoreBlock, idx: Int): Boolean {
+				return isEffectivelyEmptyMap(b.outputsData.getOrNull(idx))
+			}
+
+			val emptyRequired = requiredIn.count { (p, idx) -> outEmpty(p, idx) }
+			val hasAnyNonEmpty = inAll.any { (p, idx) -> !outEmpty(p, idx) }
 
 			val allowPartial = b.type in setOf(
 				BlockType.MAPPING_GROOVY,
@@ -254,9 +295,14 @@ class EngineRunner(
 
 					// триггерим детей только внутри множества кандидатов
 					outgoingEdges[block].orEmpty().forEach { e ->
-						val nonEmpty = block.outputsData.getOrNull(e.outIdx)?.isNotEmpty() == true
-						if (!nonEmpty) return@forEach
-
+						val payload = block.outputsData.getOrNull(e.outIdx)
+						val nonEmpty = !isEffectivelyEmptyMap(payload)
+						if (!nonEmpty) {
+							return@forEach
+						}
+						if (e.conn.isNeedDataToRun && isEffectivelyEmptyMap(payload)) {
+							return@forEach
+						}
 						if (!e.conn.isOptional) {
 							val left = pending[e.child]!!.decrementAndGet()
 							if (left == 0) enqueueReady(e.child)
@@ -280,9 +326,15 @@ class EngineRunner(
 
 		fun pumpReady() {
 			while (true) {
-				if (formPaused() || formSlot.get()) break
+				if (inFlight.get() >= maxParallelism) {
+					break
+				}
+				if (formPaused() || formSlot.get()) {
+					break
+				}
 				if (breakPhaseAfterForm.get()) {
-					val b = readyOthers.poll() ?: break
+					val b = readyOthers.poll()
+						?: break
 					submit(b)
 					continue
 				}
@@ -292,7 +344,8 @@ class EngineRunner(
 					submit(f.block)
 					break
 				}
-				val b = readyOthers.poll() ?: break
+				val b = readyOthers.poll()
+					?: break
 				submit(b)
 			}
 		}
@@ -480,6 +533,13 @@ class EngineRunner(
 				else -> block.outputsData
 			}
 			block.outputsData = newOutputs.toMutableList()
+			val vers = outputVersion.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
+			block.outputsData.forEachIndexed { i, out ->
+				val nonEmpty = !isEffectivelyEmptyMap(out)
+				if (nonEmpty) {
+					vers[i] = globalTick.incrementAndGet()
+				}
+			}
 		} catch (t: Exception) {
 			listeners.forEach { it.onError(block, t) }
 			throw t
@@ -488,13 +548,17 @@ class EngineRunner(
 
 
 	private suspend fun awaitForm(block: CoreBlock, specJson: String, initial: Map<String, Any?>): Map<String, Any?> {
-		val promise = CompletableDeferred<Map<String, Any?>>()
-		formWaiters[block.id] = promise
 		formListener?.onFormRequested(block, specJson, initial)
-		return try {
-			promise.await()
-		} finally {
-			formWaiters.remove(block.id)
+		formQueues[block.id]?.poll()?.let { ready ->
+			if (formQueues[block.id]?.isEmpty() == true) formQueues.remove(block.id)
+			return ready
+		}
+		val promise = CompletableDeferred<Map<String, Any?>>()
+		formWaiters.put(block.id, promise)?.cancel()
+		return promise.await().also {
+			if (formQueues[block.id]?.isEmpty() == true) {
+				formQueues.remove(block.id)
+			}
 		}
 	}
 
@@ -503,23 +567,25 @@ class EngineRunner(
 	private fun collectInputs(block: CoreBlock, project: CoreProject): Map<String, MutableMap<String, Any?>> {
 		val byId = project.blocks.associateBy { it.id }
 		val inputs = mutableMapOf<String, MutableMap<String, Any?>>()
+		val inputsVer = mutableMapOf<String, Long>()
 		project.connections
 			.filter { it.toId == block.id }
 			.forEach { conn ->
 				val fromBlock = byId[conn.fromId]
 				val fromOutIdx = fromBlock?.outputIds?.indexOf(conn.fromOutputId) ?: -1
-				val value = if (fromOutIdx >= 0) {
-					fromBlock?.outputsData?.getOrNull(fromOutIdx) ?: mutableMapOf()
-				} else {
-					mutableMapOf()
-				}
+				val value = if (fromOutIdx >= 0) deepCopyMap(fromBlock?.outputsData?.getOrNull(fromOutIdx)) else mutableMapOf()
 				val toInIdx = block.inputIds.indexOf(conn.toInputId)
 				val portName = if (toInIdx >= 0) {
 					block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx"
 				} else {
 					"in?"
 				}
-				inputs[portName] = value
+				val ver = outputVersion[fromBlock?.id]?.getOrNull(fromOutIdx) ?: -1L
+				val prevVer = inputsVer[portName] ?: -1L
+				if (ver >= prevVer) {
+					inputs[portName] = value
+					inputsVer[portName] = ver
+				}
 			}
 		return inputs
 	}
@@ -557,14 +623,16 @@ class EngineRunner(
 
 
 	@Suppress("UNCHECKED_CAST")
-	private fun normalizeValue(v: Any?, ignoreKeys: Set<String>): Any? = when (v) {
-		is Map<*, *> -> normalizeMap(v as Map<String, Any?>, ignoreKeys)
-		is List<*> -> v.map { normalizeValue(it, ignoreKeys) }
-		is Int, is Short, is Byte, is Long -> (v as Number).toLong()
-		is Float, is Double -> (v as Number).toDouble()
-		is BigInteger -> v.toLong()
-		is BigDecimal -> v.toDouble()
-		else -> v
+	private fun normalizeValue(v: Any?, ignoreKeys: Set<String>): Any? {
+		return when (v) {
+			is Map<*, *> -> normalizeMap(v as Map<String, Any?>, ignoreKeys)
+			is List<*> -> v.map { normalizeValue(it, ignoreKeys) }
+			is Int, is Short, is Byte, is Long -> (v as Number).toLong()
+			is Float, is Double -> (v as Number).toDouble()
+			is BigInteger -> v.toLong()
+			is BigDecimal -> v.toDouble()
+			else -> v
+		}
 	}
 
 
@@ -576,17 +644,9 @@ class EngineRunner(
 			val src = byId.getValue(c.fromId)
 			val idx = src.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
 			val m = src.outputsData.getOrNull(idx)
-			m.isNullOrEmpty()
+			isEffectivelyEmptyMap(m)
 		}
 	}
-
-
-	private data class EdgeKey(
-		val fromId: UUID,
-		val toId: UUID,
-		val fromOut: UUID,
-		val toIn: UUID,
-	)
 
 
 	private data class InEdge(
