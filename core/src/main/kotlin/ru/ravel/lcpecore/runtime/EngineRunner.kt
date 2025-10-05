@@ -290,10 +290,16 @@ class EngineRunner(
 				else -> lackRequired
 			}
 			pending[b] = AtomicInteger(need)
-			if (need == 0) enqueueReady(b)
-
-			pending[b] = AtomicInteger(need)
-			if (need == 0) enqueueReady(b)
+			if (need == 0) {
+				val hasOptional = allIncoming[b].orEmpty().any { it.conn.isOptional }
+				val hasFreshOptional = allIncoming[b].orEmpty().any { it.conn.isOptional && edgeFreshFor(b, it) }
+				val noRequired = requiredIncomingCount[b] == 0
+				if (noRequired && hasOptional && !hasFreshOptional) {
+					// ждём первого свежего опционального входа
+				} else {
+					enqueueReady(b)
+				}
+			}
 		}
 		if (readyForms.isEmpty() && readyOthers.isEmpty()) return
 
@@ -327,7 +333,10 @@ class EngineRunner(
 								}
 							}
 						} else {
-							if (pending[e.child]!!.get() == 0) enqueueReady(e.child)
+							val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
+							if (pending[e.child]!!.get() == 0 && fresh) {
+								enqueueReady(e.child)
+							}
 						}
 					}
 				} catch (t: Throwable) {
