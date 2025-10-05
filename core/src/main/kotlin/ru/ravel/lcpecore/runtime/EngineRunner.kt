@@ -36,11 +36,6 @@ class EngineRunner(
 	private val formQueues = ConcurrentHashMap<UUID, ConcurrentLinkedQueue<Map<String, Any?>>>()
 	private val outputVersion = ConcurrentHashMap<UUID, MutableList<Long>>()
 	private val globalTick = AtomicLong(0)
-	private val lastFormPortVersion = ConcurrentHashMap<UUID, MutableMap<String, Long>>()
-	private val lastPortVersion = ConcurrentHashMap<UUID, MutableMap<String, Long>>()
-	private val globalFormTick = AtomicLong(0)
-	private val outputFormTick = ConcurrentHashMap<UUID, MutableList<Long>>()
-
 
 	private fun formPauseOn() {
 		activeForms.incrementAndGet()
@@ -65,19 +60,14 @@ class EngineRunner(
 	/** Внешняя точка возобновления: Android вызывает на submit */
 	fun submitForm(blockId: UUID, values: Map<String, Any?>) {
 		val q = formQueues.computeIfAbsent(blockId) { ConcurrentLinkedQueue() }
-		q.clear()
 		q.add(values)
 		formWaiters.remove(blockId)?.let { waiter ->
-			var last = q.poll()
-			var next = q.poll()
-			while (next != null) {
-				last = next; next = q.poll()
+			q.poll()?.let { next ->
+				if (!waiter.isCompleted) waiter.complete(next)
 			}
-			if (last != null && !waiter.isCompleted) waiter.complete(last)
-			formQueues.remove(blockId)
+			if (q.isEmpty()) formQueues.remove(blockId)
 		}
 	}
-
 
 	private fun isEffectivelyEmptyMap(m: Map<String, Any?>?): Boolean {
 		if (m.isNullOrEmpty()) return true
@@ -104,16 +94,9 @@ class EngineRunner(
 		}
 	}
 
+	private fun deepCopyMap(m: Map<String, Any?>?): MutableMap<String, Any?> =
+		if (m == null) mutableMapOf() else deepCopyAny(m) as MutableMap<String, Any?>
 
-	private fun deepCopyMap(m: Map<String, Any?>?): MutableMap<String, Any?> {
-		return if (m == null) mutableMapOf() else deepCopyAny(m) as MutableMap<String, Any?>
-	}
-
-	private fun isMapper(block: CoreBlock): Boolean {
-		return block.type == BlockType.MAPPING_GROOVY ||
-				block.type == BlockType.MAPPING_PYTHON ||
-				block.type == BlockType.MAPPING_JAVA_SCRIPT
-	}
 
 
 	/** Событие для UI формы */
@@ -264,36 +247,10 @@ class EngineRunner(
 			return d * 100_000 + project.blocks.indexOf(b) // стабильный тай-брейкер
 		}
 
-		fun hasFormParent(b: CoreBlock): Boolean {
-			return allIncoming[b].orEmpty().any { it.parent.type == BlockType.FORM }
-		}
-
-		fun isStaleWrtForm(b: CoreBlock): Boolean {
-			if (!hasFormParent(b)) {
-				return false
-			}
-			val target = globalFormTick.get()
-			if (target == 0L) {
-				return false
-			}
-			val maxTick = maxInputFormTick(b, project)
-			return maxTick < target
-		}
-
 		fun enqueueReady(b: CoreBlock) {
-			if (!scheduled.add(b.id)) {
-				return
-			}
-			if (b.type != BlockType.FORM && isStaleWrtForm(b)) {
-				pending[b]?.compareAndSet(0, 1)
-				scheduled.remove(b.id)
-				return
-			}
-			if (b.type == BlockType.FORM) {
-				readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
-			} else {
-				readyOthers.add(b)
-			}
+			if (!scheduled.add(b.id)) return
+			if (b.type == BlockType.FORM) readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
+			else readyOthers.add(b)
 		}
 
 		// первичная инициализация ожиданий — по ВСЕМ входам; MAPPING_* по-прежнему можно запускать частично
@@ -319,15 +276,9 @@ class EngineRunner(
 				b.type == BlockType.FORM && eagerForms && requiredIncomingCount[b] == 0 -> 0
 				else -> emptyRequired
 			}
-			val initialNeed = if (need == 0 && b.type != BlockType.FORM && isStaleWrtForm(b)) {
-				1
-			} else {
-				need
-			}
-			pending[b] = AtomicInteger(initialNeed)
-			if (initialNeed == 0) {
-				enqueueReady(b)
-			}
+
+			pending[b] = AtomicInteger(need)
+			if (need == 0) enqueueReady(b)
 		}
 		if (readyForms.isEmpty() && readyOthers.isEmpty()) return
 
@@ -420,19 +371,6 @@ class EngineRunner(
 	) {
 		val prev = block.outputsData.map { it.toMutableMap() }
 		if (!preserveOutputs && !block.type.isService() && block.type != BlockType.PROPERTIES) {
-			// 1) Обязательные порты: должны быть НОВЫМИ...
-			if (shouldSkipByRequiredPorts(block, project)) {
-				block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
-				return
-			}
-			if (!requiredPortsUpToDateWithForm(block, project)) {
-				block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
-				return
-			}
-			if (isMapper(block) && shouldSkipMapperByFormFreshness(block, project)) {
-				block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
-				return
-			}
 			block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
 		}
 		try {
@@ -595,24 +533,12 @@ class EngineRunner(
 				else -> block.outputsData
 			}
 			block.outputsData = newOutputs.toMutableList()
-			// Зафиксировали «съеденные» версии входов
-			noteRequiredPortsConsumed(block, project)
-			if (isMapper(block)) noteFormPortsConsumed(block, project)
-
-			// Обновляем formTick на выходах:
-			// - для FORM: новый глобальный тик и он же — на все её выходы;
-			// - для остальных: берем максимум из входов.
-			val formTickForThisRun = if (block.type == BlockType.FORM) {
-				globalFormTick.incrementAndGet()
-			} else {
-				maxInputFormTick(block, project)
-			}
-			val ft = outputFormTick.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
-			repeat(block.outputCount) { i -> ft[i] = formTickForThisRun }
-			// Обновляем версии выходов (как и было)
 			val vers = outputVersion.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
 			block.outputsData.forEachIndexed { i, out ->
-				if (!isEffectivelyEmptyMap(out)) vers[i] = globalTick.incrementAndGet()
+				val nonEmpty = !isEffectivelyEmptyMap(out)
+				if (nonEmpty) {
+					vers[i] = globalTick.incrementAndGet()
+				}
 			}
 		} catch (t: Exception) {
 			listeners.forEach { it.onError(block, t) }
@@ -622,12 +548,17 @@ class EngineRunner(
 
 
 	private suspend fun awaitForm(block: CoreBlock, specJson: String, initial: Map<String, Any?>): Map<String, Any?> {
-		formQueues[block.id] = ConcurrentLinkedQueue()
 		formListener?.onFormRequested(block, specJson, initial)
+		formQueues[block.id]?.poll()?.let { ready ->
+			if (formQueues[block.id]?.isEmpty() == true) formQueues.remove(block.id)
+			return ready
+		}
 		val promise = CompletableDeferred<Map<String, Any?>>()
 		formWaiters.put(block.id, promise)?.cancel()
 		return promise.await().also {
-			formQueues.remove(block.id)
+			if (formQueues[block.id]?.isEmpty() == true) {
+				formQueues.remove(block.id)
+			}
 		}
 	}
 
@@ -715,111 +646,6 @@ class EngineRunner(
 			val m = src.outputsData.getOrNull(idx)
 			isEffectivelyEmptyMap(m)
 		}
-	}
-
-
-	private fun maxFormInputVersions(block: CoreBlock, project: CoreProject): Map<String, Long> {
-		val byId = project.blocks.associateBy { it.id }
-		val res = mutableMapOf<String, Long>()
-		project.connections
-			.filter { it.toId == block.id }
-			.forEach { c ->
-				val from = byId[c.fromId] ?: return@forEach
-				if (from.type != BlockType.FORM) return@forEach
-				val toInIdx = block.inputIds.indexOf(c.toInputId)
-				if (toInIdx < 0) return@forEach
-				val port = block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx"
-				val outIdx = from.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
-				val v = outputVersion[from.id]?.getOrNull(outIdx) ?: -1L
-				val prev = res[port] ?: -1L
-				if (v > prev) res[port] = v
-			}
-		return res
-	}
-
-
-	private fun maxRequiredInputVersions(block: CoreBlock, project: CoreProject): Map<String, Long> {
-		val byId = project.blocks.associateBy { it.id }
-		val res = mutableMapOf<String, Long>()
-		project.connections
-			.filter { it.toId == block.id && it.isNeedDataToRun }
-			.forEach { c ->
-				val from = byId[c.fromId] ?: return@forEach
-				val toInIdx = block.inputIds.indexOf(c.toInputId)
-				if (toInIdx < 0) return@forEach
-				val port = block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx"
-				val outIdx = from.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
-				val v = outputVersion[from.id]?.getOrNull(outIdx) ?: -1L
-				val prev = res[port] ?: -1L
-				if (v > prev) res[port] = v
-			}
-		return res
-	}
-
-
-	private fun shouldSkipByRequiredPorts(block: CoreBlock, project: CoreProject): Boolean {
-		val currentReq = maxRequiredInputVersions(block, project)
-		val lastReq = lastPortVersion.computeIfAbsent(block.id) { mutableMapOf() }
-		val needFresh = currentReq.isEmpty() || currentReq.any { (port, ver) -> ver > (lastReq[port] ?: -1L) }
-		return !needFresh
-	}
-
-	// Зафиксировать, что блок "съел" текущие версии обязательных портов
-	private fun noteRequiredPortsConsumed(block: CoreBlock, project: CoreProject) {
-		val curReq = maxRequiredInputVersions(block, project)
-		if (curReq.isNotEmpty()) {
-			val dst = lastPortVersion.computeIfAbsent(block.id) { mutableMapOf() }
-			curReq.forEach { (k, v) -> dst[k] = v }
-		}
-	}
-
-	// Гейтинг мапперов: запускать только на НОВОМ входе от FORM (если такой вход у них есть)
-	private fun shouldSkipMapperByFormFreshness(block: CoreBlock, project: CoreProject): Boolean {
-		val current = maxFormInputVersions(block, project)          // версии именно от FORM
-		val last = lastFormPortVersion.computeIfAbsent(block.id) { mutableMapOf() }
-		val hasForm = current.isNotEmpty()
-		val hasFreshForm = !hasForm || current.any { (port, ver) -> ver > (last[port] ?: -1L) }
-		return !hasFreshForm
-	}
-
-	// Зафиксировать, что маппер "съел" свежие версии FORM-входов
-	private fun noteFormPortsConsumed(block: CoreBlock, project: CoreProject) {
-		val cur = maxFormInputVersions(block, project)
-		if (cur.isNotEmpty()) {
-			val dst = lastFormPortVersion.computeIfAbsent(block.id) { mutableMapOf() }
-			cur.forEach { (k, v) -> dst[k] = v }
-		}
-	}
-
-
-	/** Максимальный formTick среди всех входов блока на данный момент */
-	private fun maxInputFormTick(block: CoreBlock, project: CoreProject): Long {
-		val byId = project.blocks.associateBy { it.id }
-		var mx = 0L
-		project.connections.filter { it.toId == block.id }.forEach { c ->
-			val p = byId[c.fromId] ?: return@forEach
-			val outIdx = p.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
-			val t = outputFormTick[p.id]?.getOrNull(outIdx) ?: 0L
-			if (t > mx) mx = t
-		}
-		return mx
-	}
-
-	/** Обязательные входы блока подтянуты до текущего formTick? (если вообще есть формы) */
-	private fun requiredPortsUpToDateWithForm(block: CoreBlock, project: CoreProject): Boolean {
-		val target = globalFormTick.get()
-		if (target == 0L) return true // пока не было submit'ов FORM — нечего синхронизировать
-		val byId = project.blocks.associateBy { it.id }
-		var hasRequired = false
-		project.connections.filter { it.toId == block.id && it.isNeedDataToRun }.forEach { c ->
-			hasRequired = true
-			val p = byId[c.fromId] ?: return@forEach
-			val outIdx = p.outputIds.indexOf(c.fromOutputId).let { if (it >= 0) it else 0 }
-			val t = outputFormTick[p.id]?.getOrNull(outIdx) ?: 0L
-			if (t < target) return false
-		}
-		// если обязательных портов нет — правило «свежести» по ним и так пропустит
-		return true
 	}
 
 
