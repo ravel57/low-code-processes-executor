@@ -36,6 +36,13 @@ class EngineRunner(
 	private val formQueues = ConcurrentHashMap<UUID, ConcurrentLinkedQueue<Map<String, Any?>>>()
 	private val outputVersion = ConcurrentHashMap<UUID, MutableList<Long>>()
 	private val globalTick = AtomicLong(0)
+	private val consumedVer = ConcurrentHashMap<UUID, MutableMap<UUID, Long>>()
+
+
+	private fun edgeKey(c: CoreConnection): UUID {
+		return UUID.nameUUIDFromBytes("${c.fromId}:${c.fromOutputId}:${c.toId}:${c.toInputId}".toByteArray())
+	}
+
 
 	private fun formPauseOn() {
 		activeForms.incrementAndGet()
@@ -96,7 +103,6 @@ class EngineRunner(
 
 	private fun deepCopyMap(m: Map<String, Any?>?): MutableMap<String, Any?> =
 		if (m == null) mutableMapOf() else deepCopyAny(m) as MutableMap<String, Any?>
-
 
 
 	/** Событие для UI формы */
@@ -248,9 +254,15 @@ class EngineRunner(
 		}
 
 		fun enqueueReady(b: CoreBlock) {
-			if (!scheduled.add(b.id)) return
-			if (b.type == BlockType.FORM) readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
-			else readyOthers.add(b)
+			if (!scheduled.add(b.id)) {
+				return
+			}
+			if (b.type == BlockType.FORM) {
+				readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
+			}
+			else {
+				readyOthers.add(b)
+			}
 		}
 
 		// первичная инициализация ожиданий — по ВСЕМ входам; MAPPING_* по-прежнему можно запускать частично
@@ -262,7 +274,6 @@ class EngineRunner(
 				return isEffectivelyEmptyMap(b.outputsData.getOrNull(idx))
 			}
 
-			val emptyRequired = requiredIn.count { (p, idx) -> outEmpty(p, idx) }
 			val hasAnyNonEmpty = inAll.any { (p, idx) -> !outEmpty(p, idx) }
 
 			val allowPartial = b.type in setOf(
@@ -271,11 +282,15 @@ class EngineRunner(
 				BlockType.MAPPING_JAVA_SCRIPT
 			)
 
+			val lackRequired = requiredIn.count { inEdge -> !edgeFreshFor(b, inEdge) }
+
 			val need = when {
 				allowPartial && hasAnyNonEmpty -> 0
 				b.type == BlockType.FORM && eagerForms && requiredIncomingCount[b] == 0 -> 0
-				else -> emptyRequired
+				else -> lackRequired
 			}
+			pending[b] = AtomicInteger(need)
+			if (need == 0) enqueueReady(b)
 
 			pending[b] = AtomicInteger(need)
 			if (need == 0) enqueueReady(b)
@@ -304,8 +319,13 @@ class EngineRunner(
 							return@forEach
 						}
 						if (!e.conn.isOptional) {
-							val left = pending[e.child]!!.decrementAndGet()
-							if (left == 0) enqueueReady(e.child)
+							val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
+							if (fresh) {
+								val left = pending[e.child]!!.decrementAndGet()
+								if (left == 0) {
+									enqueueReady(e.child)
+								}
+							}
 						} else {
 							if (pending[e.child]!!.get() == 0) enqueueReady(e.child)
 						}
@@ -314,7 +334,10 @@ class EngineRunner(
 					listeners.forEach { it.onError(block, t) }
 				} finally {
 					listeners.forEach { it.onFinish(block) }
-//					val noQueues = readyForms.isEmpty() && readyOthers.isEmpty()
+					allIncoming[block].orEmpty().forEach { inEdge ->
+						val verNow = outputVersion[inEdge.parent.id]?.getOrNull(inEdge.outIdx) ?: -1L
+						consumedVer.computeIfAbsent(block.id) { ConcurrentHashMap() }[edgeKey(inEdge.conn)] = verNow
+					}
 					val drainedOthers = readyOthers.isEmpty()
 					val noFormsAllowedOrPending = breakPhaseAfterForm.get() || readyForms.isEmpty()
 					if (inFlight.decrementAndGet() == 0 && drainedOthers && noFormsAllowedOrPending) {
@@ -646,6 +669,15 @@ class EngineRunner(
 			val m = src.outputsData.getOrNull(idx)
 			isEffectivelyEmptyMap(m)
 		}
+	}
+
+
+	private fun edgeFreshFor(child: CoreBlock, e: InEdge): Boolean {
+		val parent = e.parent
+		val hasValue = !isEffectivelyEmptyMap(parent.outputsData.getOrNull(e.outIdx))
+		val ver = outputVersion[parent.id]?.getOrNull(e.outIdx) ?: -1L
+		val last = consumedVer[child.id]?.get(edgeKey(e.conn)) ?: -1L
+		return if (e.conn.isNeedDataToRun) (hasValue && ver > last) else hasValue
 	}
 
 
