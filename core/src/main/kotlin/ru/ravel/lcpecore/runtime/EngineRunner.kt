@@ -313,7 +313,12 @@ class EngineRunner(
 			inFlight.incrementAndGet()
 			scope.launch {
 				listeners.forEach { it.onStart(block) }
+				var consumedSnapshot: Map<UUID, Long> = emptyMap()
 				try {
+					consumedSnapshot = allIncoming[block].orEmpty().associate { inEdge ->
+						val verNow = outputVersion[inEdge.parent.id]?.getOrNull(inEdge.outIdx) ?: -1L
+						edgeKey(inEdge.conn) to verNow
+					}
 					runBlock(block, project)
 					listeners.forEach { it.onOutput(block, mapOf("outputs" to block.outputsData)) }
 
@@ -350,10 +355,8 @@ class EngineRunner(
 					listeners.forEach { it.onError(block, t) }
 				} finally {
 					listeners.forEach { it.onFinish(block) }
-					allIncoming[block].orEmpty().forEach { inEdge ->
-						val verNow = outputVersion[inEdge.parent.id]?.getOrNull(inEdge.outIdx) ?: -1L
-						consumedVer.computeIfAbsent(block.id) { ConcurrentHashMap() }[edgeKey(inEdge.conn)] = verNow
-					}
+					val dst = consumedVer.computeIfAbsent(block.id) { ConcurrentHashMap() }
+					consumedSnapshot.forEach { (edgeUuid, ver) -> dst[edgeUuid] = ver }
 					val drainedOthers = readyOthers.isEmpty()
 					val noFormsAllowedOrPending = breakPhaseAfterForm.get() || readyForms.isEmpty()
 					if (inFlight.decrementAndGet() == 0 && drainedOthers && noFormsAllowedOrPending) {
