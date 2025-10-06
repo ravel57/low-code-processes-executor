@@ -212,7 +212,7 @@ class EngineRunner(
 		// кто получает входы ИЗВНЕ множества кандидатов (только по НЕопциональным рёбрам) — для якорей/ранга
 		val candidateIds = candidates.map { it.id }.toSet()
 		val hasIncomingFromOutside: Map<CoreBlock, Boolean> = candidates.associateWith { b ->
-			project.connections.any { c -> c.toId == b.id && c.fromId !in candidateIds && !c.isOptional }
+			project.connections.any { c -> c.toId == b.id && c.fromId !in candidateIds && c.incomeDataType != IncomeDataType.OPTIONAL }
 		}
 
 		// --- очереди готовых
@@ -224,7 +224,7 @@ class EngineRunner(
 		// --- степень ожидания по НЕопциональным входам (считаем по ВСЕМ входам)
 		val pending = ConcurrentHashMap<CoreBlock, AtomicInteger>()
 		val requiredIncomingCount = candidates.associateWith { b ->
-			allIncoming[b].orEmpty().count { !it.conn.isOptional }
+			allIncoming[b].orEmpty().count { it.conn.incomeDataType != IncomeDataType.OPTIONAL }
 		}
 
 		// якоря для ранжирования форм: нет обязательных входов, есть внешний вход, START/INPUT_DATA/PROPERTIES
@@ -259,22 +259,20 @@ class EngineRunner(
 			}
 			if (b.type == BlockType.FORM) {
 				readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
-			}
-			else {
+			} else {
 				readyOthers.add(b)
 			}
 		}
 
-		// первичная инициализация ожиданий — по ВСЕМ входам; MAPPING_* по-прежнему можно запускать частично
+		fun hasData(parent: CoreBlock, outIdx: Int): Boolean =
+			!isEffectivelyEmptyMap(parent.outputsData.getOrNull(outIdx))
+
+		// Первичная инициализация ожиданий
 		candidates.forEach { b ->
 			val inAll = allIncoming[b].orEmpty()
-			val requiredIn = inAll.filter { !it.conn.isOptional }
+			val requiredIn = inAll.filter { it.conn.incomeDataType != IncomeDataType.OPTIONAL }
 
-			fun outEmpty(b: CoreBlock, idx: Int): Boolean {
-				return isEffectivelyEmptyMap(b.outputsData.getOrNull(idx))
-			}
-
-			val hasAnyNonEmpty = inAll.any { (p, idx) -> !outEmpty(p, idx) }
+			val hasAnyNonEmpty = inAll.any { (p, idx) -> hasData(p, idx) }
 
 			val allowPartial = b.type in setOf(
 				BlockType.MAPPING_GROOVY,
@@ -282,7 +280,12 @@ class EngineRunner(
 				BlockType.MAPPING_JAVA_SCRIPT
 			)
 
-			val lackRequired = requiredIn.count { inEdge -> !edgeFreshFor(b, inEdge) }
+			val lackRequired = requiredIn.count { inEdge ->
+				when (inEdge.conn.incomeDataType) {
+					IncomeDataType.REQUIRED_FRESH_DATA -> !edgeFreshFor(b, inEdge)
+					else -> !hasData(inEdge.parent, inEdge.outIdx)
+				}
+			}
 
 			val need = when {
 				allowPartial && hasAnyNonEmpty -> 0
@@ -291,8 +294,8 @@ class EngineRunner(
 			}
 			pending[b] = AtomicInteger(need)
 			if (need == 0) {
-				val hasOptional = allIncoming[b].orEmpty().any { it.conn.isOptional }
-				val hasFreshOptional = allIncoming[b].orEmpty().any { it.conn.isOptional && edgeFreshFor(b, it) }
+				val hasOptional = inAll.any { it.conn.incomeDataType == IncomeDataType.OPTIONAL }
+				val hasFreshOptional = inAll.any { it.conn.incomeDataType == IncomeDataType.OPTIONAL && edgeFreshFor(b, it) }
 				val noRequired = requiredIncomingCount[b] == 0
 				if (noRequired && hasOptional && !hasFreshOptional) {
 					// ждём первого свежего опционального входа
@@ -321,21 +324,25 @@ class EngineRunner(
 						if (!nonEmpty) {
 							return@forEach
 						}
-						if (e.conn.isNeedDataToRun && isEffectivelyEmptyMap(payload)) {
-							return@forEach
-						}
-						if (!e.conn.isOptional) {
-							val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
-							if (fresh) {
-								val left = pending[e.child]!!.decrementAndGet()
-								if (left == 0) {
+						when (e.conn.incomeDataType) {
+							IncomeDataType.OPTIONAL -> {
+								val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
+								if (pending[e.child]!!.get() == 0 && fresh) {
 									enqueueReady(e.child)
 								}
 							}
-						} else {
-							val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
-							if (pending[e.child]!!.get() == 0 && fresh) {
-								enqueueReady(e.child)
+
+							IncomeDataType.REQUIRED_DATA -> {
+								val left = pending[e.child]!!.decrementAndGet()
+								if (left == 0) enqueueReady(e.child)
+							}
+
+							IncomeDataType.REQUIRED_FRESH_DATA -> {
+								val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
+								if (fresh) {
+									val left = pending[e.child]!!.decrementAndGet()
+									if (left == 0) enqueueReady(e.child)
+								}
 							}
 						}
 					}
@@ -431,7 +438,7 @@ class EngineRunner(
 
 					block.outputNames.map { name ->
 						when (val v = inout[name]) {
-							is MutableMap<*, *> -> (v as MutableMap<String, Any?>).toMutableMap()
+							is MutableMap<*, *> -> v.toMutableMap()
 							is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
 							null -> outputs[name]?.toMutableMap() ?: mutableMapOf()
 							else -> mutableMapOf("value" to v)
@@ -475,7 +482,7 @@ class EngineRunner(
 					}
 					inputs.forEach { (_, v) ->
 						val map = when (v) {
-							is MutableMap<*, *> -> v as MutableMap<String, Any?>
+							is MutableMap<*, *> -> v
 							is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
 							else -> mutableMapOf("value" to v)
 						}
@@ -498,7 +505,7 @@ class EngineRunner(
 					}
 					inputs.forEach { (_, v) ->
 						val map = when (v) {
-							is MutableMap<*, *> -> v as MutableMap<String, Any?>
+							is MutableMap<*, *> -> v
 							is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
 							else -> mutableMapOf("value" to v)
 						}
@@ -686,7 +693,11 @@ class EngineRunner(
 		val hasValue = !isEffectivelyEmptyMap(parent.outputsData.getOrNull(e.outIdx))
 		val ver = outputVersion[parent.id]?.getOrNull(e.outIdx) ?: -1L
 		val last = consumedVer[child.id]?.get(edgeKey(e.conn)) ?: -1L
-		return if (e.conn.isNeedDataToRun) (hasValue && ver > last) else hasValue
+		return when (e.conn.incomeDataType) {
+			IncomeDataType.OPTIONAL -> hasValue
+			IncomeDataType.REQUIRED_DATA -> hasValue
+			IncomeDataType.REQUIRED_FRESH_DATA -> hasValue && (ver > last)
+		}
 	}
 
 

@@ -3,6 +3,7 @@ package ru.ravel.lcpedesktop
 import javafx.scene.paint.Color
 import javafx.scene.shape.Line
 import ru.ravel.lcpecore.model.CoreConnection
+import ru.ravel.lcpecore.model.IncomeDataType
 import java.util.UUID
 import kotlin.math.sqrt
 
@@ -67,6 +68,7 @@ class Connection constructor(
 		toId = to.core.id,
 		fromOutputId = fromPort,
 		toInputId = toPort,
+		incomeDataType = IncomeDataType.REQUIRED_DATA,
 	)
 
 }
