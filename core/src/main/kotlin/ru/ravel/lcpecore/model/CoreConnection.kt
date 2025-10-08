@@ -35,4 +35,7 @@ data class CoreConnection @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) const
 		isNeedDataToRun -> IncomeDataType.REQUIRED_FRESH_DATA
 		else -> IncomeDataType.REQUIRED_DATA
 	},
+
+	@JsonProperty("gate")
+	val gate: EdgeGate? = null,
 )

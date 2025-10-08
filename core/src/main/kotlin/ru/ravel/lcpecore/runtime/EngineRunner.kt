@@ -325,6 +325,11 @@ class EngineRunner(
 					// триггерим детей только внутри множества кандидатов
 					outgoingEdges[block].orEmpty().forEach { e ->
 						val payload = block.outputsData.getOrNull(e.outIdx)
+
+						// 1) Сначала гейт: если не проходит — вообще не рассматриваем это ребро
+						if (!passesGate(payload, e.conn.gate)) return@forEach
+
+						// 2) Базовый фильтр: пустая map не будит ребёнка
 						val nonEmpty = !isEffectivelyEmptyMap(payload)
 						if (!nonEmpty) {
 							return@forEach
@@ -700,6 +705,20 @@ class EngineRunner(
 			IncomeDataType.OPTIONAL -> hasValue
 			IncomeDataType.REQUIRED_DATA -> hasValue
 			IncomeDataType.REQUIRED_FRESH_DATA -> hasValue && (ver > last)
+		}
+	}
+
+
+	private fun passesGate(payload: Any?, gate: EdgeGate?): Boolean {
+		if (gate == null) return true
+		return when (gate.mode) {
+			GateMode.ALWAYS -> true
+			GateMode.NON_EMPTY -> (payload as? Map<*, *>)?.isNotEmpty() == true
+			GateMode.WHEN_KEY_PRESENT -> (payload as? Map<*, *>)?.containsKey(gate.key) == true
+			GateMode.WHEN_EQUALS -> {
+				val m = payload as? Map<*, *> ?: return false
+				m[gate.key]?.toString() == gate.equals
+			}
 		}
 	}
 
