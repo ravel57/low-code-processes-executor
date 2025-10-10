@@ -19,22 +19,8 @@ data class CoreConnection @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) const
 	@JsonProperty("toInputId")
 	val toInputId: UUID = UUID.randomUUID(),
 
-	@get:JsonIgnore
-	@JsonProperty("isOptional")
-	@Deprecated("Use incomeDataType")
-	var isOptional: Boolean = false,
-
-	@get:JsonIgnore
-	@JsonProperty("isNeedDataToRun")
-	@Deprecated("Use incomeDataType")
-	var isNeedDataToRun: Boolean = false,
-
 	@JsonProperty("incomeDataType")
-	val incomeDataType: IncomeDataType = when {
-		isOptional -> IncomeDataType.OPTIONAL
-		isNeedDataToRun -> IncomeDataType.REQUIRED_FRESH_DATA
-		else -> IncomeDataType.REQUIRED_DATA
-	},
+	val incomeDataType: IncomeDataType = IncomeDataType.REQUIRED_DATA,
 
 	@JsonProperty("gate")
 	val gate: EdgeGate? = null,

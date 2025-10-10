@@ -172,7 +172,11 @@ class EngineRunner(
 	private fun runPhase(project: CoreProject, exclude: Set<CoreBlock>, eagerForms: Boolean) {
 		val byId = project.blocks.associateBy { it.id }
 		val candidates = project.blocks.filter { it !in exclude }.toSet()
-		if (candidates.isEmpty()) return
+		val ranThisPhase = ConcurrentHashMap.newKeySet<UUID>()
+		val queuedThisPhase = ConcurrentHashMap.newKeySet<UUID>()
+		if (candidates.isEmpty()) {
+			return
+		}
 
 		data class FormQEntry(val block: CoreBlock, val rank: Int, val ticket: Long)
 
@@ -257,6 +261,9 @@ class EngineRunner(
 			if (!scheduled.add(b.id)) {
 				return
 			}
+			if (!queuedThisPhase.add(b.id)) {
+				return
+			}
 			if (b.type == BlockType.FORM) {
 				readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
 			} else {
@@ -264,21 +271,14 @@ class EngineRunner(
 			}
 		}
 
-		fun hasData(parent: CoreBlock, outIdx: Int): Boolean =
-			!isEffectivelyEmptyMap(parent.outputsData.getOrNull(outIdx))
+		fun hasData(parent: CoreBlock, outIdx: Int): Boolean {
+			return !isEffectivelyEmptyMap(parent.outputsData.getOrNull(outIdx))
+		}
 
 		// Первичная инициализация ожиданий
 		candidates.forEach { b ->
 			val inAll = allIncoming[b].orEmpty()
 			val requiredIn = inAll.filter { it.conn.incomeDataType != IncomeDataType.OPTIONAL }
-
-			val hasAnyNonEmpty = inAll.any { (p, idx) -> hasData(p, idx) }
-
-			val allowPartial = b.type in setOf(
-				BlockType.MAPPING_GROOVY,
-				BlockType.MAPPING_PYTHON,
-				BlockType.MAPPING_JAVA_SCRIPT
-			)
 
 			val lackRequired = requiredIn.count { inEdge ->
 				when (inEdge.conn.incomeDataType) {
@@ -286,11 +286,11 @@ class EngineRunner(
 					else -> !hasData(inEdge.parent, inEdge.outIdx)
 				}
 			}
-
-			val need = when {
-				allowPartial && hasAnyNonEmpty -> 0
-				b.type == BlockType.FORM && eagerForms && requiredIncomingCount[b] == 0 -> 0
-				else -> lackRequired
+			// НИКАКИХ «частичных» запусков: ждём все обязательные входы
+			val need = if (b.type == BlockType.FORM && eagerForms && requiredIncomingCount[b] == 0) {
+				0
+			} else {
+				lackRequired
 			}
 			pending[b] = AtomicInteger(need)
 			if (need == 0) {
@@ -300,6 +300,9 @@ class EngineRunner(
 				if (noRequired && hasOptional && !hasFreshOptional) {
 					// ждём первого свежего опционального входа
 				} else {
+					if (ranThisPhase.contains(b.id)) {
+						return
+					}
 					enqueueReady(b)
 				}
 			}
@@ -337,7 +340,7 @@ class EngineRunner(
 						when (e.conn.incomeDataType) {
 							IncomeDataType.OPTIONAL -> {
 								val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
-								if (pending[e.child]!!.get() == 0 && fresh) {
+								if (!ranThisPhase.contains(e.child.id) && pending[e.child]!!.get() == 0 && fresh) {
 									enqueueReady(e.child)
 								}
 							}
@@ -351,7 +354,9 @@ class EngineRunner(
 								val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
 								if (fresh) {
 									val left = pending[e.child]!!.decrementAndGet()
-									if (left == 0) enqueueReady(e.child)
+									if (left == 0) {
+										enqueueReady(e.child)
+									}
 								}
 							}
 						}
@@ -359,6 +364,7 @@ class EngineRunner(
 				} catch (t: Throwable) {
 					listeners.forEach { it.onError(block, t) }
 				} finally {
+					ranThisPhase.add(block.id)
 					listeners.forEach { it.onFinish(block) }
 					val dst = consumedVer.computeIfAbsent(block.id) { ConcurrentHashMap() }
 					consumedSnapshot.forEach { (edgeUuid, ver) -> dst[edgeUuid] = ver }
@@ -407,6 +413,8 @@ class EngineRunner(
 			}
 		}
 		runBlocking { done.await() }
+		queuedThisPhase.clear()
+		ranThisPhase.clear()
 	}
 
 
@@ -702,7 +710,7 @@ class EngineRunner(
 		val ver = outputVersion[parent.id]?.getOrNull(e.outIdx) ?: -1L
 		val last = consumedVer[child.id]?.get(edgeKey(e.conn)) ?: -1L
 		return when (e.conn.incomeDataType) {
-			IncomeDataType.OPTIONAL -> hasValue
+			IncomeDataType.OPTIONAL -> hasValue //&& (ver > last)
 			IncomeDataType.REQUIRED_DATA -> hasValue
 			IncomeDataType.REQUIRED_FRESH_DATA -> hasValue && (ver > last)
 		}

@@ -892,7 +892,16 @@ class MainApp : Application() {
 							viewOrder = 0.9
 						}
 						val conn =
-							Connection(block, toBlock, visible, draggingFromOutputId!!, toBlock.core.inputIds[inputIdx], pick)
+							Connection(
+								block,
+								toBlock,
+								visible,
+								draggingFromOutputId!!,
+								toBlock.core.inputIds[inputIdx],
+								pick,
+								IncomeDataType.REQUIRED_DATA,
+								null,
+							)
 						conn.updateLine()
 						connections.add(conn)
 						if (!workspaceGroup.children.contains(visible)) {
@@ -1129,7 +1138,7 @@ class MainApp : Application() {
 					isPickOnBounds = false
 					viewOrder = 0.9
 				}
-				val conn = Connection(from, to, visible, c.fromOutputId, c.toInputId, pick)
+				val conn = Connection(from, to, visible, c.fromOutputId, c.toInputId, pick, c.incomeDataType, c.gate)
 				conn.updateLine()
 				connections += conn
 				(visible.parent as? Pane)?.children?.remove(visible)

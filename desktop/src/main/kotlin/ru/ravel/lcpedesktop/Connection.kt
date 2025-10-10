@@ -3,8 +3,9 @@ package ru.ravel.lcpedesktop
 import javafx.scene.paint.Color
 import javafx.scene.shape.Line
 import ru.ravel.lcpecore.model.CoreConnection
+import ru.ravel.lcpecore.model.EdgeGate
 import ru.ravel.lcpecore.model.IncomeDataType
-import java.util.UUID
+import java.util.*
 import kotlin.math.sqrt
 
 
@@ -15,6 +16,8 @@ class Connection constructor(
 	val fromPort: UUID,
 	val toPort: UUID,
 	val pick: Line,
+	val incomeDataType: IncomeDataType = IncomeDataType.REQUIRED_DATA,
+	val gate: EdgeGate? = null,
 ) {
 	var selected: Boolean = false
 		set(value) {
@@ -68,7 +71,8 @@ class Connection constructor(
 		toId = to.core.id,
 		fromOutputId = fromPort,
 		toInputId = toPort,
-		incomeDataType = IncomeDataType.REQUIRED_DATA,
+		incomeDataType = incomeDataType,
+		gate = gate,
 	)
 
 }
