@@ -10,10 +10,10 @@ import java.math.BigInteger
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.collections.*
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.collections.*
 
 class EngineRunner(
 	private val groovy: GroovyExecutor?,
@@ -37,6 +37,11 @@ class EngineRunner(
 	private val outputVersion = ConcurrentHashMap<UUID, MutableList<Long>>()
 	private val globalTick = AtomicLong(0)
 	private val consumedVer = ConcurrentHashMap<UUID, MutableMap<UUID, Long>>()
+	private val failedSnapshotByBlock = ConcurrentHashMap<UUID, Map<UUID, Long>>()
+	private val lastInputVerByBlock: MutableMap<UUID, MutableMap<UUID, Long>> = ConcurrentHashMap()
+	private val consumedPayloadByBlock: MutableMap<UUID, MutableMap<UUID, Map<String, Any?>>> = ConcurrentHashMap()
+	private val versionPhase = ConcurrentHashMap<UUID, MutableList<Long>>() // версия -> номер фазы
+	private val currentPhase = AtomicLong(0)
 
 
 	private fun edgeKey(c: CoreConnection): UUID {
@@ -174,14 +179,14 @@ class EngineRunner(
 		val candidates = project.blocks.filter { it !in exclude }.toSet()
 		val ranThisPhase = ConcurrentHashMap.newKeySet<UUID>()
 		val queuedThisPhase = ConcurrentHashMap.newKeySet<UUID>()
+		currentPhase.incrementAndGet()
 		if (candidates.isEmpty()) {
 			return
 		}
 
 		data class FormQEntry(val block: CoreBlock, val rank: Int, val ticket: Long)
 
-		// --- входящие рёбра ТОЛЬКО внутри множества кандидатов (для пробуждения детей и BFS)
-		val incomingRestricted: Map<CoreBlock, List<InEdge>> = candidates.associateWith { b ->
+		candidates.associateWith { b ->
 			project.connections
 				.filter { it.toId == b.id }
 				.mapNotNull { c ->
@@ -275,6 +280,20 @@ class EngineRunner(
 			return !isEffectivelyEmptyMap(parent.outputsData.getOrNull(outIdx))
 		}
 
+		fun readyNow(child: CoreBlock): Boolean {
+			val inAll = allIncoming[child].orEmpty()
+			return inAll
+				.filter { it.conn.incomeDataType != IncomeDataType.OPTIONAL }
+				.all { inEdge ->
+					when (inEdge.conn.incomeDataType) {
+						IncomeDataType.REQUIRED_FRESH_DATA -> edgeFreshFor(child, inEdge)
+						IncomeDataType.REQUIRED_DATA -> hasData(inEdge.parent, inEdge.outIdx)
+						else -> true
+					}
+				}
+		}
+
+
 		// Первичная инициализация ожиданий
 		candidates.forEach { b ->
 			val inAll = allIncoming[b].orEmpty()
@@ -317,57 +336,105 @@ class EngineRunner(
 			scope.launch {
 				listeners.forEach { it.onStart(block) }
 				var consumedSnapshot: Map<UUID, Long> = emptyMap()
+				var success = false
 				try {
-					consumedSnapshot = allIncoming[block].orEmpty().associate { inEdge ->
-						val verNow = outputVersion[inEdge.parent.id]?.getOrNull(inEdge.outIdx) ?: -1L
-						edgeKey(inEdge.conn) to verNow
+					consumedSnapshot = run {
+						val last = consumedVer[block.id].orEmpty()
+
+						data class Pick(val edge: UUID, val ver: Long)
+
+						val best = mutableMapOf<String, Pick>() // port -> winner
+						allIncoming[block].orEmpty().forEach { inEdge ->
+							val parent = inEdge.parent
+							val ver = outputVersion[parent.id]?.getOrNull(inEdge.outIdx) ?: -1L
+							val edge = edgeKey(inEdge.conn)
+							val needFresh = inEdge.conn.incomeDataType == IncomeDataType.OPTIONAL ||
+									inEdge.conn.incomeDataType == IncomeDataType.REQUIRED_FRESH_DATA
+							val was = last[edge] ?: -1L
+							if (needFresh && ver <= was) return@forEach
+							val toInIdx = block.inputIds.indexOf(inEdge.conn.toInputId)
+							val port = if (toInIdx >= 0) block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx" else "in?"
+							val prev = best[port]
+							if (prev == null || ver >= prev.ver) best[port] = Pick(edge, ver)
+						}
+						best.values.associate { it.edge to it.ver }
+					}
+					if (failedSnapshotByBlock[block.id] == consumedSnapshot) {
+						ranThisPhase.add(block.id)
+						listeners.forEach { it.onFinish(block) }
+						if (inFlight.decrementAndGet() == 0 && readyOthers.isEmpty() &&
+							(breakPhaseAfterForm.get() || readyForms.isEmpty())
+						) {
+							done.complete(Unit)
+						}
+						return@launch
 					}
 					runBlock(block, project)
+					success = true
+
+					failedSnapshotByBlock.remove(block.id)
+					lastInputVerByBlock.compute(block.id) { _, prev ->
+						val m = (prev ?: mutableMapOf()).toMutableMap()
+						consumedSnapshot.forEach { (edge, ver) -> m[edge] = ver }
+						m
+					}
+					lastInputVerByBlock.compute(block.id) { _, prev ->
+						val m = (prev ?: mutableMapOf()).toMutableMap()
+						consumedSnapshot.forEach { (edge, ver) -> m[edge] = ver }
+						m
+					}
+					consumedPayloadByBlock.compute(block.id) { _, prev ->
+						val m = (prev ?: mutableMapOf()).toMutableMap()
+						allIncoming[block].orEmpty().forEach { inEdge ->
+							val parent = inEdge.parent
+							val outIdx = inEdge.outIdx
+							val edge = edgeKey(inEdge.conn)
+							val payload = deepCopyMap(parent.outputsData.getOrNull(outIdx))
+							m[edge] = normalizeMap(payload, ignoreKeys = emptySet())
+						}
+						m
+					}
 					listeners.forEach { it.onOutput(block, mapOf("outputs" to block.outputsData)) }
 
-					// триггерим детей только внутри множества кандидатов
 					outgoingEdges[block].orEmpty().forEach { e ->
 						val payload = block.outputsData.getOrNull(e.outIdx)
-
-						// 1) Сначала гейт: если не проходит — вообще не рассматриваем это ребро
 						if (!passesGate(payload, e.conn.gate)) return@forEach
+						if (isEffectivelyEmptyMap(payload)) return@forEach
 
-						// 2) Базовый фильтр: пустая map не будит ребёнка
-						val nonEmpty = !isEffectivelyEmptyMap(payload)
-						if (!nonEmpty) {
-							return@forEach
-						}
+						val child = e.child
+						val fresh = edgeFreshFor(child, InEdge(block, e.outIdx, e.conn))
+
 						when (e.conn.incomeDataType) {
 							IncomeDataType.OPTIONAL -> {
-								val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
-								if (!ranThisPhase.contains(e.child.id) && pending[e.child]!!.get() == 0 && fresh) {
-									enqueueReady(e.child)
+								if (fresh && !ranThisPhase.contains(child.id) && readyNow(child)) {
+									enqueueReady(child)
 								}
 							}
 
-							IncomeDataType.REQUIRED_DATA -> {
-								val left = pending[e.child]!!.decrementAndGet()
-								if (left == 0) enqueueReady(e.child)
-							}
-
-							IncomeDataType.REQUIRED_FRESH_DATA -> {
-								val fresh = edgeFreshFor(e.child, InEdge(block, e.outIdx, e.conn))
-								if (fresh) {
-									val left = pending[e.child]!!.decrementAndGet()
-									if (left == 0) {
-										enqueueReady(e.child)
-									}
+							IncomeDataType.REQUIRED_DATA,
+							IncomeDataType.REQUIRED_FRESH_DATA,
+							-> {
+								if (readyNow(child)) {
+									enqueueReady(child)
 								}
 							}
 						}
 					}
 				} catch (t: Throwable) {
 					listeners.forEach { it.onError(block, t) }
+					failedSnapshotByBlock[block.id] = consumedSnapshot
 				} finally {
 					ranThisPhase.add(block.id)
 					listeners.forEach { it.onFinish(block) }
-					val dst = consumedVer.computeIfAbsent(block.id) { ConcurrentHashMap() }
-					consumedSnapshot.forEach { (edgeUuid, ver) -> dst[edgeUuid] = ver }
+					if (success) {
+						val dst = consumedVer.computeIfAbsent(block.id) { ConcurrentHashMap() }
+						consumedSnapshot.forEach { (edgeUuid, ver) -> dst[edgeUuid] = ver }
+					}
+					consumedVer[block.id]?.forEach { (edge, ver) ->
+						if (!outputVersion[block.id].orEmpty().any { it > ver }) {
+							consumedVer[block.id]?.set(edge, ver)
+						}
+					}
 					val drainedOthers = readyOthers.isEmpty()
 					val noFormsAllowedOrPending = breakPhaseAfterForm.get() || readyForms.isEmpty()
 					if (inFlight.decrementAndGet() == 0 && drainedOthers && noFormsAllowedOrPending) {
@@ -436,7 +503,8 @@ class EngineRunner(
 					val cls = block.groovyClassName?.trim().orEmpty()
 					val code = readCode(block, project)
 
-					val inout = inputs.toMutableMap().apply { putAll(outputs) }
+					val allInputs = block.inputNames.associateWith { inputs[it] ?: mutableMapOf() }
+					val inout = allInputs.toMutableMap().apply { putAll(outputs) }
 					val retAny = requireNotNull(groovy) { "GroovyExecutor is not provided" }
 						.exec(code, inout, cls)
 
@@ -592,7 +660,10 @@ class EngineRunner(
 			block.outputsData.forEachIndexed { i, out ->
 				val nonEmpty = !isEffectivelyEmptyMap(out)
 				if (nonEmpty) {
-					vers[i] = globalTick.incrementAndGet()
+					val newVer = globalTick.incrementAndGet()
+					vers[i] = newVer
+					val phaseList = versionPhase.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
+					phaseList[i] = currentPhase.get()
 				}
 			}
 		} catch (t: Exception) {
@@ -623,25 +694,32 @@ class EngineRunner(
 		val byId = project.blocks.associateBy { it.id }
 		val inputs = mutableMapOf<String, MutableMap<String, Any?>>()
 		val inputsVer = mutableMapOf<String, Long>()
+		val lastUsed: Map<UUID, Long> = consumedVer[block.id].orEmpty()
 		project.connections
 			.filter { it.toId == block.id }
 			.forEach { conn ->
 				val fromBlock = byId[conn.fromId]
 				val fromOutIdx = fromBlock?.outputIds?.indexOf(conn.fromOutputId) ?: -1
-				val value = if (fromOutIdx >= 0) deepCopyMap(fromBlock?.outputsData?.getOrNull(fromOutIdx)) else mutableMapOf()
 				val toInIdx = block.inputIds.indexOf(conn.toInputId)
-				val portName = if (toInIdx >= 0) {
-					block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx"
+				val portName = if (toInIdx >= 0) block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx" else "in?"
+				val value = if (fromOutIdx >= 0) {
+					deepCopyMap(fromBlock?.outputsData?.getOrNull(fromOutIdx))
 				} else {
-					"in?"
+					mutableMapOf()
 				}
 				val ver = outputVersion[fromBlock?.id]?.getOrNull(fromOutIdx) ?: -1L
+				val needFresh = conn.incomeDataType == IncomeDataType.OPTIONAL ||
+						conn.incomeDataType == IncomeDataType.REQUIRED_FRESH_DATA
+				val edge = edgeKey(conn)
+				val was = lastUsed[edge] ?: -1L
+				if (needFresh && ver <= was) return@forEach
 				val prevVer = inputsVer[portName] ?: -1L
 				if (ver >= prevVer) {
 					inputs[portName] = value
 					inputsVer[portName] = ver
 				}
 			}
+		block.inputNames.forEach { name -> inputs.putIfAbsent(name, mutableMapOf()) }
 		return inputs
 	}
 
@@ -709,10 +787,12 @@ class EngineRunner(
 		val hasValue = !isEffectivelyEmptyMap(parent.outputsData.getOrNull(e.outIdx))
 		val ver = outputVersion[parent.id]?.getOrNull(e.outIdx) ?: -1L
 		val last = consumedVer[child.id]?.get(edgeKey(e.conn)) ?: -1L
+		val phaseOfVer = versionPhase[parent.id]?.getOrNull(e.outIdx) ?: 0L
+		val isNewPhase = phaseOfVer < currentPhase.get()
 		return when (e.conn.incomeDataType) {
-			IncomeDataType.OPTIONAL -> hasValue //&& (ver > last)
-			IncomeDataType.REQUIRED_DATA -> hasValue
-			IncomeDataType.REQUIRED_FRESH_DATA -> hasValue && (ver > last)
+			IncomeDataType.OPTIONAL -> hasValue && (ver > last) && isNewPhase
+			IncomeDataType.REQUIRED_DATA -> hasValue && (ver > last) && isNewPhase
+			IncomeDataType.REQUIRED_FRESH_DATA -> hasValue && (ver > last) && isNewPhase
 		}
 	}
 
