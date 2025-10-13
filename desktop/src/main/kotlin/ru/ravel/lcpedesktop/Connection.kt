@@ -16,8 +16,8 @@ class Connection constructor(
 	val fromPort: UUID,
 	val toPort: UUID,
 	val pick: Line,
-	val incomeDataType: IncomeDataType = IncomeDataType.REQUIRED_DATA,
-	val gate: EdgeGate? = null,
+	var incomeDataType: IncomeDataType = IncomeDataType.REQUIRED_DATA,
+	var gate: EdgeGate? = null,
 ) {
 	var selected: Boolean = false
 		set(value) {

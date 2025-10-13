@@ -23,9 +23,6 @@ import javafx.stage.Stage
 import org.fxmisc.flowless.VirtualizedScrollPane
 import org.fxmisc.richtext.CodeArea
 import org.fxmisc.richtext.LineNumberFactory
-import ru.ravel.lcpecore.model.BlockType
-import ru.ravel.lcpecore.model.CoreBlock
-import ru.ravel.lcpecore.model.InputFormatType
 import java.io.File
 import kotlin.math.roundToInt
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -35,6 +32,7 @@ import javafx.scene.input.ClipboardContent
 import javafx.scene.input.MouseEvent
 import javafx.scene.input.TransferMode
 import javafx.util.Callback
+import ru.ravel.lcpecore.model.*
 import java.util.*
 
 

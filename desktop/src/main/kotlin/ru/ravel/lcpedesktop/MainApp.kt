@@ -7,8 +7,10 @@ import groovy.lang.Binding
 import groovy.lang.GroovyShell
 import javafx.application.Application
 import javafx.application.Platform
+import javafx.collections.FXCollections
 import javafx.event.EventHandler
 import javafx.geometry.Insets
+import javafx.geometry.Pos
 import javafx.scene.Group
 import javafx.scene.Node
 import javafx.scene.Scene
@@ -921,6 +923,9 @@ class MainApp : Application() {
 							if (ev.button == MouseButton.PRIMARY) {
 								selectConnection(conn)
 								(pick.parent as? Pane)?.requestFocus()
+								if (ev.clickCount == 2) {
+									showConnectionSettings(conn)
+								}
 								ev.consume()
 							}
 						}
@@ -1155,6 +1160,9 @@ class MainApp : Application() {
 					if (ev.button == MouseButton.PRIMARY) {
 						selectConnection(conn)
 						(pick.parent as? Pane)?.requestFocus()
+						if (ev.clickCount == 2) {
+							showConnectionSettings(conn)
+						}
 						ev.consume()
 					}
 				}
@@ -1540,6 +1548,67 @@ class MainApp : Application() {
 			}
 		}
 	}
+
+
+	/** Открывает окно свойств соединения (двойной клик по линии) */
+	fun showConnectionSettings(conn: Connection) {
+		val dialog = Stage()
+		dialog.title = "Параметры соединения"
+
+		val incomeTypes = IncomeDataType.entries
+		val gates = GateMode.entries
+
+		val incomeTypeCombo = ComboBox(FXCollections.observableArrayList(incomeTypes)).apply {
+			value = conn.incomeDataType
+			prefWidth = 200.0
+		}
+
+		val gateModeCombo = ComboBox(FXCollections.observableArrayList(gates)).apply {
+			value = conn.gate?.mode ?: GateMode.ALWAYS
+			prefWidth = 200.0
+		}
+
+		val keyField = TextField(conn.gate?.key ?: "").apply { promptText = "Ключ (WHEN_KEY_PRESENT / WHEN_EQUALS)" }
+		val equalsField = TextField(conn.gate?.equals ?: "").apply { promptText = "Значение (WHEN_EQUALS)" }
+
+		fun updateGate() {
+			val mode = gateModeCombo.value
+			conn.gate = when (mode) {
+				GateMode.WHEN_KEY_PRESENT -> EdgeGate(mode, key = keyField.text.ifBlank { null })
+				GateMode.WHEN_EQUALS -> EdgeGate(mode, key = keyField.text.ifBlank { null }, equals = equalsField.text.ifBlank { null })
+				else -> EdgeGate(mode)
+			}
+		}
+
+		gateModeCombo.setOnAction { updateGate() }
+		keyField.textProperty().addListener { _, _, _ -> updateGate() }
+		equalsField.textProperty().addListener { _, _, _ -> updateGate() }
+
+		val saveBtn = Button("Сохранить").apply {
+			setOnAction {
+				conn.incomeDataType = incomeTypeCombo.value
+				updateGate()
+				dialog.close()
+			}
+		}
+
+		val layout = VBox(10.0,
+			HBox(10.0, Label("Тип входных данных:"), incomeTypeCombo),
+			HBox(10.0, Label("Gate режим:"), gateModeCombo),
+			HBox(10.0, Label("Ключ:"), keyField),
+			HBox(10.0, Label("Значение:"), equalsField),
+			saveBtn
+		).apply {
+			padding = Insets(12.0)
+			alignment = Pos.TOP_LEFT
+		}
+
+		dialog.scene = Scene(layout, 420.0, 250.0)
+		dialog.initOwner(stage)
+		dialog.initModality(Modality.WINDOW_MODAL)
+		dialog.show()
+	}
+
 
 
 	companion object {

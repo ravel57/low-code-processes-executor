@@ -24,7 +24,7 @@ class EngineRunner(
 	private val listeners: List<ExecutionListener> = emptyList(),
 	/** Слушатель форм: сообщаем на Android, что нужна форма, и ждём submit */
 	private val formListener: FormListener? = null,
-	private val maxParallelism: Int = 1,
+	private val maxParallelism: Int = Runtime.getRuntime().availableProcessors(),
 ) {
 
 	/** Внутренний реестр «ожиданий» по FORM: blockId -> обещание с данными submit */
@@ -42,6 +42,10 @@ class EngineRunner(
 	private val consumedPayloadByBlock: MutableMap<UUID, MutableMap<UUID, Map<String, Any?>>> = ConcurrentHashMap()
 	private val versionPhase = ConcurrentHashMap<UUID, MutableList<Long>>() // версия -> номер фазы
 	private val currentPhase = AtomicLong(0)
+	private val blockLocks = ConcurrentHashMap<UUID, Any>()
+	private val versionReady = ConcurrentHashMap<UUID, MutableList<CompletableDeferred<Unit>>>()
+	private val blockReadySignal = ConcurrentHashMap<UUID, CompletableDeferred<Unit>>()
+
 
 
 	private fun edgeKey(c: CoreConnection): UUID {
@@ -106,8 +110,9 @@ class EngineRunner(
 		}
 	}
 
-	private fun deepCopyMap(m: Map<String, Any?>?): MutableMap<String, Any?> =
-		if (m == null) mutableMapOf() else deepCopyAny(m) as MutableMap<String, Any?>
+	private fun deepCopyMap(m: Map<String, Any?>?): MutableMap<String, Any?> {
+		return if (m == null) mutableMapOf() else deepCopyAny(m) as MutableMap<String, Any?>
+	}
 
 
 	/** Событие для UI формы */
@@ -179,7 +184,6 @@ class EngineRunner(
 		val candidates = project.blocks.filter { it !in exclude }.toSet()
 		val ranThisPhase = ConcurrentHashMap.newKeySet<UUID>()
 		val queuedThisPhase = ConcurrentHashMap.newKeySet<UUID>()
-		currentPhase.incrementAndGet()
 		if (candidates.isEmpty()) {
 			return
 		}
@@ -228,7 +232,6 @@ class EngineRunner(
 		val readyForms = PriorityQueue(compareBy<FormQEntry> { it.rank }.thenBy { it.ticket })
 		val readyOthers = ConcurrentLinkedQueue<CoreBlock>()
 		val formTicket = AtomicLong(0)
-		val scheduled = ConcurrentHashMap.newKeySet<UUID>()  // чтобы не ставить блок в очередь дважды
 
 		// --- степень ожидания по НЕопциональным входам (считаем по ВСЕМ входам)
 		val pending = ConcurrentHashMap<CoreBlock, AtomicInteger>()
@@ -262,17 +265,21 @@ class EngineRunner(
 			return d * 100_000 + project.blocks.indexOf(b) // стабильный тай-брейкер
 		}
 
+		val scheduledMap = ConcurrentHashMap<UUID, Boolean>()
+		val runningNow = ConcurrentHashMap<UUID, Boolean>()
 		fun enqueueReady(b: CoreBlock) {
-			if (!scheduled.add(b.id)) {
-				return
-			}
-			if (!queuedThisPhase.add(b.id)) {
-				return
-			}
-			if (b.type == BlockType.FORM) {
-				readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
-			} else {
-				readyOthers.add(b)
+			synchronizedBlock(b.id) {
+				if (runningNow.containsKey(b.id)) return@synchronizedBlock
+				val alreadyScheduled = scheduledMap.putIfAbsent(b.id, true) != null
+				val alreadyQueued = !queuedThisPhase.add(b.id)
+				if (alreadyScheduled || alreadyQueued) {
+					return@synchronizedBlock
+				}
+				if (b.type == BlockType.FORM) {
+					readyForms.add(FormQEntry(b, formRank(b), formTicket.incrementAndGet()))
+				} else {
+					readyOthers.add(b)
+				}
 			}
 		}
 
@@ -333,7 +340,13 @@ class EngineRunner(
 
 		fun submit(block: CoreBlock) {
 			inFlight.incrementAndGet()
+			if (runningNow.putIfAbsent(block.id, true) != null) {
+				return
+			}
 			scope.launch {
+				if (ranThisPhase.contains(block.id)) {
+					return@launch
+				}
 				listeners.forEach { it.onStart(block) }
 				var consumedSnapshot: Map<UUID, Long> = emptyMap()
 				var success = false
@@ -406,7 +419,10 @@ class EngineRunner(
 
 						when (e.conn.incomeDataType) {
 							IncomeDataType.OPTIONAL -> {
-								if (fresh && !ranThisPhase.contains(child.id) && readyNow(child)) {
+								if (fresh && !ranThisPhase.contains(child.id) && !scheduledMap.containsKey(child.id) && readyNow(
+										child
+									)
+								) {
 									enqueueReady(child)
 								}
 							}
@@ -414,7 +430,7 @@ class EngineRunner(
 							IncomeDataType.REQUIRED_DATA,
 							IncomeDataType.REQUIRED_FRESH_DATA,
 							-> {
-								if (readyNow(child)) {
+								if (readyNow(child) && !scheduledMap.containsKey(child.id) && !ranThisPhase.contains(child.id)) {
 									enqueueReady(child)
 								}
 							}
@@ -440,6 +456,7 @@ class EngineRunner(
 					if (inFlight.decrementAndGet() == 0 && drainedOthers && noFormsAllowedOrPending) {
 						done.complete(Unit)
 					}
+					runningNow.remove(block.id)
 				}
 			}
 		}
@@ -482,6 +499,7 @@ class EngineRunner(
 		runBlocking { done.await() }
 		queuedThisPhase.clear()
 		ranThisPhase.clear()
+		currentPhase.incrementAndGet()
 	}
 
 
@@ -489,12 +507,11 @@ class EngineRunner(
 	private suspend fun runBlock(
 		block: CoreBlock,
 		project: CoreProject,
-		preserveOutputs: Boolean = false,
 	) {
-		val prev = block.outputsData.map { it.toMutableMap() }
-		if (!preserveOutputs && !block.type.isService() && block.type != BlockType.PROPERTIES) {
-			block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
+		val prev = synchronizedBlock(block.id) {
+			block.outputsData.map { it.toMutableMap() }
 		}
+		blockReadySignal[block.id] = CompletableDeferred()
 		try {
 			val newOutputs: List<MutableMap<String, Any?>> = when (block.type) {
 				BlockType.MAPPING_GROOVY -> {
@@ -655,21 +672,33 @@ class EngineRunner(
 
 				else -> block.outputsData
 			}
-			block.outputsData = newOutputs.toMutableList()
-			val vers = outputVersion.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
-			block.outputsData.forEachIndexed { i, out ->
-				val nonEmpty = !isEffectivelyEmptyMap(out)
-				if (nonEmpty) {
-					val newVer = globalTick.incrementAndGet()
-					vers[i] = newVer
-					val phaseList = versionPhase.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
-					phaseList[i] = currentPhase.get()
-				}
+			if (!block.type.isService() && block.type != BlockType.PROPERTIES) {
+				block.outputsData = MutableList(block.outputCount) { mutableMapOf() }
 			}
+			block.outputsData = newOutputs.toMutableList()
 		} catch (t: Exception) {
 			listeners.forEach { it.onError(block, t) }
 			throw t
+		} finally {
+			synchronizedBlock(block.id) {
+				val vers = outputVersion.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
+				block.outputsData.forEachIndexed { i, out ->
+					val nonEmpty = !isEffectivelyEmptyMap(out)
+					if (nonEmpty) {
+						val newVer = globalTick.incrementAndGet()
+						vers[i] = newVer
+						val phaseList = versionPhase.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
+						phaseList[i] = currentPhase.get()
+						blockReadySignal.remove(block.id)?.complete(Unit)
+					}
+				}
+			}
+			versionReady.compute(block.id) { _, p ->
+				p?.forEach { it.complete(Unit) }
+				mutableListOf()
+			}
 		}
+
 	}
 
 
@@ -702,8 +731,14 @@ class EngineRunner(
 				val fromOutIdx = fromBlock?.outputIds?.indexOf(conn.fromOutputId) ?: -1
 				val toInIdx = block.inputIds.indexOf(conn.toInputId)
 				val portName = if (toInIdx >= 0) block.inputNames.getOrNull(toInIdx) ?: "in$toInIdx" else "in?"
-				val value = if (fromOutIdx >= 0) {
-					deepCopyMap(fromBlock?.outputsData?.getOrNull(fromOutIdx))
+				val value = if (fromOutIdx >= 0 && fromBlock != null) {
+					// Ждём, пока родитель реально закончит runBlock и зафиксирует выходы
+					runBlocking {
+						blockReadySignal[fromBlock.id]?.await()
+					}
+					synchronizedBlock(fromBlock.id) {
+						deepCopyMap(fromBlock.outputsData.getOrNull(fromOutIdx))
+					}
 				} else {
 					mutableMapOf()
 				}
@@ -784,16 +819,20 @@ class EngineRunner(
 
 	private fun edgeFreshFor(child: CoreBlock, e: InEdge): Boolean {
 		val parent = e.parent
-		val hasValue = !isEffectivelyEmptyMap(parent.outputsData.getOrNull(e.outIdx))
+		val payload = parent.outputsData.getOrNull(e.outIdx)
+		val hasValue = !isEffectivelyEmptyMap(payload)
 		val ver = outputVersion[parent.id]?.getOrNull(e.outIdx) ?: -1L
 		val last = consumedVer[child.id]?.get(edgeKey(e.conn)) ?: -1L
 		val phaseOfVer = versionPhase[parent.id]?.getOrNull(e.outIdx) ?: 0L
+		if (!hasValue || ver <= last) return false
 		val isNewPhase = phaseOfVer < currentPhase.get()
-		return when (e.conn.incomeDataType) {
-			IncomeDataType.OPTIONAL -> hasValue && (ver > last) && isNewPhase
-			IncomeDataType.REQUIRED_DATA -> hasValue && (ver > last) && isNewPhase
-			IncomeDataType.REQUIRED_FRESH_DATA -> hasValue && (ver > last) && isNewPhase
+		if (!isNewPhase) return false
+		val payloadChanged = run {
+			val lastPayload = consumedPayloadByBlock[child.id]?.get(edgeKey(e.conn))
+			val normalized = normalizeMap(payload ?: emptyMap(), ignoreKeys = emptySet())
+			lastPayload != normalized
 		}
+		return payloadChanged || isNewPhase
 	}
 
 
@@ -807,6 +846,13 @@ class EngineRunner(
 				val m = payload as? Map<*, *> ?: return false
 				m[gate.key]?.toString() == gate.equals
 			}
+		}
+	}
+
+
+	private fun <T> synchronizedBlock(blockId: UUID, action: () -> T): T {
+		return synchronized(blockLocks.computeIfAbsent(blockId) { Any() }) {
+			action()
 		}
 	}
 
