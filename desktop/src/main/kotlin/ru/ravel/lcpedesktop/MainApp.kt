@@ -169,6 +169,7 @@ class MainApp : Application() {
 			subApp.start(stage)
 			Platform.runLater {
 				subApp.restoreUiFromCore(project)
+				scrollToRightmostBlock()
 				subApp.outputsRepo.loadLast(file, project)
 				subApp.applyOutputsToUi(project)
 				subApp.currentProjectFile = file
@@ -317,10 +318,14 @@ class MainApp : Application() {
 		primaryStage.userData = this
 		primaryStage.show()
 		drawGrid(gridCanvas, 10.0)
-		gridCanvas.widthProperty().bind(scrollPane.viewportBoundsProperty().map { it.width })
-		gridCanvas.heightProperty().bind(scrollPane.viewportBoundsProperty().map { it.height })
+		gridCanvas.widthProperty().bind(contentPane.widthProperty())
+		gridCanvas.heightProperty().bind(contentPane.heightProperty())
 		gridCanvas.widthProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
 		gridCanvas.heightProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
+		scrollPane.hvalueProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
+		scrollPane.vvalueProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
+		contentPane.widthProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
+		contentPane.heightProperty().addListener { _, _, _ -> drawGrid(gridCanvas) }
 
 		// Контекстное меню для создания блока
 		contentPane.onMouseClicked = EventHandler { event ->
@@ -340,6 +345,7 @@ class MainApp : Application() {
 								}
 								fc.showOpenDialog(primaryStage)?.let { file ->
 									val node = addBlock(event.x, event.y, file.nameWithoutExtension, type)
+									scrollToRightmostBlock()
 									val base = currentProjectFile?.parentFile ?: File(".")
 									node.core.subProjectPath = storeRel(base, file)
 									adjustSubProjectNodeIO(node, file)
@@ -717,7 +723,7 @@ class MainApp : Application() {
 				val file = if (b.type == BlockType.INPUT_DATA) {
 					val desiredExt = when (b.inputFormat) {
 						InputFormatType.JSON -> "json"
-						InputFormatType.XML  -> "xml"
+						InputFormatType.XML -> "xml"
 						InputFormatType.YAML -> "yaml"
 						else -> "txt"
 					}
@@ -741,6 +747,7 @@ class MainApp : Application() {
 		}
 		workspaceGroup.children.add(block)
 		setupHandlersForBlock(block)
+		Platform.runLater { scrollToRightmostBlock() }
 		markDirty()
 		return block
 	}
@@ -1020,45 +1027,38 @@ class MainApp : Application() {
 	}
 
 
+	/** Отрисовать сетку, которая покрывает всю рабочую область (всю зону контента) */
 	private fun drawGrid(canvas: Canvas, grid: Double = 10.0, boldStep: Int = 5) {
 		val gc = canvas.graphicsContext2D
-		gc.clearRect(0.0, 0.0, canvas.width, canvas.height)
-		val w = canvas.width
-		val h = canvas.height
-		val offsetX = contentPane.layoutX % grid
-		val offsetY = contentPane.layoutY % grid
+		val w = contentPane.width
+		val h = contentPane.height
+		gc.clearRect(0.0, 0.0, w, h)
 		gc.stroke = Color.rgb(180, 180, 180, 0.25)
 		gc.lineWidth = 1.0
-		var x = -offsetX
+		var x = 0.0
 		while (x <= w) {
 			gc.strokeLine(x, 0.0, x, h)
 			x += grid
 		}
-		var y = -offsetY
+		var y = 0.0
 		while (y <= h) {
 			gc.strokeLine(0.0, y, w, y)
 			y += grid
 		}
 		gc.stroke = Color.rgb(120, 120, 120, 0.5)
 		gc.lineWidth = 2.0
-		x = -offsetX
-		var step = grid * boldStep
+		x = 0.0
 		while (x <= w) {
-			if (((x + offsetX) / grid) % boldStep == 0.0) {
-				gc.strokeLine(x, 0.0, x, h)
-			}
-			x += step
+			gc.strokeLine(x, 0.0, x, h)
+			x += grid * boldStep
 		}
-		y = -offsetY
+		y = 0.0
 		while (y <= h) {
-			if (((y + offsetY) / grid) % boldStep == 0.0) {
-				gc.strokeLine(0.0, y, w, y)
-			}
-			y += step
+			gc.strokeLine(0.0, y, w, y)
+			y += grid * boldStep
 		}
 		gc.lineWidth = 1.0
 	}
-
 
 	/** Собираем CoreProject из текущего UI */
 	private fun collectCoreProject(): CoreProject {
@@ -1166,6 +1166,7 @@ class MainApp : Application() {
 				to.connectedLines.add(conn)
 			}
 		} finally {
+			Platform.runLater { scrollToRightmostBlock() }
 			suppressDirty = false
 			clearDirty()
 			updateTitle()
@@ -1413,35 +1414,25 @@ class MainApp : Application() {
 
 
 	private fun ensureWorkspaceFits(b: BlockNode) {
-		val blockRight = b.layoutX + b.boundsInParent.width
-		val blockBottom = b.layoutY + b.boundsInParent.height
-		val blockLeft = b.layoutX
-		val blockTop = b.layoutY
+		// координаты блока в системе contentPane
+		val bScene = b.localToScene(b.boundsInLocal)
+		val pMin = contentPane.sceneToLocal(bScene.minX, bScene.minY)
+		val pMax = contentPane.sceneToLocal(bScene.maxX, bScene.maxY)
+
 		var changed = false
-		// вправо
-		if (blockRight > contentPane.prefWidth) {
-			contentPane.prefWidth = blockRight + 50
-			changed = true
+		if (pMax.x + 50 > contentPane.prefWidth) {
+			contentPane.prefWidth = pMax.x + 50; changed = true
 		}
-		// вниз
-		if (blockBottom > contentPane.prefHeight) {
-			contentPane.prefHeight = blockBottom + 50
-			changed = true
+		if (pMax.y + 50 > contentPane.prefHeight) {
+			contentPane.prefHeight = pMax.y + 50; changed = true
 		}
-		// влево
-		if (blockLeft < 0) {
-			val shift = -blockLeft
-			contentPane.prefWidth += shift
-			contentPane.translateX += shift
-			changed = true
+		if (pMin.x < 0) {
+			val s = -pMin.x; contentPane.prefWidth += s; contentPane.translateX += s; changed = true
 		}
-		// вверх
-		if (blockTop < 0) {
-			val shift = -blockTop
-			contentPane.prefHeight += shift
-			contentPane.translateY += shift
-			changed = true
+		if (pMin.y < 0) {
+			val s = -pMin.y; contentPane.prefHeight += s; contentPane.translateY += s; changed = true
 		}
+
 		if (changed) {
 			contentPane.requestLayout()
 		}
@@ -1510,6 +1501,43 @@ class MainApp : Application() {
 			f.normalize()
 		} else {
 			File(base, s).normalize()
+		}
+	}
+
+
+	/** Прокрутить максимально вправо — до самого дальнего блока (учёт layout, translate, padding). */
+	private fun scrollToRightmostBlock(padding: Double = 32.0) {
+		Platform.runLater {
+			// гарантируем актуальные bounds
+			contentPane.applyCss()
+			contentPane.layout()
+
+			if (blocks.isEmpty()) return@runLater
+
+			// X-координата правого края самого дальнего блока в координатах contentPane
+			val rightmostX = blocks.maxOf { b ->
+				val bndsScene = b.localToScene(b.boundsInLocal)
+				val pt = contentPane.sceneToLocal(bndsScene.maxX, bndsScene.minY)
+				pt.x
+			} + padding
+
+			// при необходимости расширяем контент
+			if (rightmostX > contentPane.prefWidth) {
+				contentPane.prefWidth = rightmostX + padding
+				contentPane.requestLayout()
+			}
+
+			val viewportW = scrollPane.viewportBounds.width
+			val contentW = contentPane.layoutBounds.width
+
+			val totalScrollable = (contentW - viewportW)
+			if (totalScrollable > 0) {
+				val target = (rightmostX - viewportW).coerceAtLeast(0.0)
+				val norm = (target / totalScrollable).coerceIn(0.0, 1.0)
+				scrollPane.hvalue = if (norm > 0.98) 1.0 else norm // добивка до самого конца
+			} else {
+				scrollPane.hvalue = 0.0
+			}
 		}
 	}
 
