@@ -477,7 +477,13 @@ class MainApp : Application() {
 					b.codeAbsolutePath
 						?.takeIf { it.exists() }
 						?.readText()
-						?.let { code -> GroovyJarCompiler.compileToJar(script = code, block = b, outputDir = outputDir) }
+						?.let { code ->
+							GroovyJarCompiler.compileToJar(
+								script = code,
+								block = b,
+								outputDir = outputDir
+							)
+						}
 				}
 				all.groupBy { it.file }.forEach { (file, list) ->
 					val proj = projectRepo.loadProject(file).apply { baseDir = file.parentFile }
@@ -731,12 +737,48 @@ class MainApp : Application() {
 					}
 					val current = b.codePath?.let { resolveStored(base, it) }
 					val needNew = current == null || !current.name.endsWith(".$desiredExt", ignoreCase = true)
-					if (needNew) codeFileFor(b) else current!!
+					if (needNew) {
+						codeFileFor(b)
+					} else {
+						current!!
+					}
 				} else {
 					b.codePath?.let { resolveStored(base, it) } ?: codeFileFor(b)
 				}
 				file.writeText(text)
 				b.codePath = storeRel(base, file)
+				markDirty()
+			},
+			loadPreProcessingCode = { b ->
+				val base = currentProjectFile?.parentFile ?: File(".")
+				b.preProcessingCodePath
+					?.let { p -> resolveStored(base, p).takeIf(File::exists)?.readText() }
+					?: ""
+			},
+			savePreProcessingCode = { core, text ->
+				val base = currentProjectFile?.parentFile ?: File(".")
+				val file = codeFileForPreProcessing(core)
+				file.writeText(text)
+				core.preProcessingCodePath = base.toPath().relativize(file.toPath()).toString().replace('\\', '/')
+				markDirty()
+			},
+			loadPostProcessingCode = { b, action, type ->
+				val resDir = File(
+					currentProjectFile?.parentFile,
+					"${currentProjectFile?.nameWithoutExtension}_resources"
+				).apply { mkdirs() }
+				val fileName = when (type) {
+					"main" -> "${b.id}_post_action_${action}.groovy"
+					"submit" -> "${b.id}_on_submit_${action}.groovy"
+					else -> ""
+				}
+				val f = File(resDir, fileName)
+				if (f.exists()) f.readText() else ""
+			},
+			savePostProcessingCode = { b, text, action, type ->
+				val f = codeFileForPostProcessing(b, action, type)  // см. шаг 3
+				f.writeText(text)
+				// ВАЖНО: не трогаем b.postProcessingCodePath — файлов теперь много.
 				markDirty()
 			},
 			callbacks = callbacks,
@@ -1013,6 +1055,10 @@ class MainApp : Application() {
 					// Старое поведение оставляло TODO — сохраняем это же поведение
 					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
 				}
+
+				InputFormatType.TOML ->
+					// Старое поведение оставляло TODO — сохраняем это же поведение
+					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
 			}
 			codeArea.replaceText(text)
 		}
@@ -1090,7 +1136,13 @@ class MainApp : Application() {
 					loadCode = { core ->
 						val base = currentProjectFile?.parentFile ?: File(".")
 						core.codePath?.let { p ->
-							val file = File(p).let { if (File(p).isAbsolute) File(p) else File(base, p) }.normalize()
+							val file = File(p).let {
+								if (File(p).isAbsolute) {
+									File(p)
+								} else {
+									File(base, p)
+								}
+							}.normalize()
 							file.takeIf { it.exists() && it.isFile }?.readText()
 						} ?: ""
 					},
@@ -1101,11 +1153,47 @@ class MainApp : Application() {
 						core.codePath = base.toPath().relativize(file.toPath()).toString().replace('\\', '/')
 						markDirty()
 					},
+					loadPreProcessingCode = { b ->
+						val base = currentProjectFile?.parentFile ?: File(".")
+						b.preProcessingCodePath
+							?.let { p -> resolveStored(base, p).takeIf(File::exists)?.readText() }
+							?: ""
+					},
+					savePreProcessingCode = { core, text ->
+						val base = currentProjectFile?.parentFile ?: File(".")
+						val file = codeFileForPreProcessing(core)
+						file.writeText(text)
+						core.preProcessingCodePath =
+							base.toPath().relativize(file.toPath()).toString().replace('\\', '/')
+						markDirty()
+					},
+					loadPostProcessingCode = { b, action, type ->
+						val resDir = File(
+							currentProjectFile?.parentFile,
+							"${currentProjectFile?.nameWithoutExtension}_resources"
+						).apply { mkdirs() }
+
+						val fileName = when (type) {
+							"main" -> "${b.id}_post_action_${action}.groovy"
+							"submit" -> "${b.id}_on_submit_${action}.groovy"
+							else -> ""
+						}
+
+						val f = File(resDir, fileName)
+						if (f.exists()) f.readText() else ""
+					},
+					savePostProcessingCode = { core, text, action, type ->
+						val f = codeFileForPostProcessing(core, action, type)
+						f.writeText(text)
+						markDirty()
+					},
 					callbacks = callbacks,
 				)
 				if (b.core.type == BlockType.SUB_PROCESS && b.core.subProjectPath.isNotBlank()) {
 					val f = resolveProjectFile(b.core.subProjectPath)
-					if (f.exists()) adjustSubProjectNodeIO(b, f)
+					if (f.exists()) {
+						adjustSubProjectNodeIO(b, f)
+					}
 				}
 				b.onMove = {
 					ensureWorkspaceFits(b)
@@ -1284,9 +1372,13 @@ class MainApp : Application() {
 		val base = b.id.also { b.id = it }
 		val ext = when (b.type) {
 			BlockType.MAPPING_GROOVY -> "groovy"
+
 			BlockType.MAPPING_PYTHON -> "py"
+
 			BlockType.MAPPING_JAVA_SCRIPT -> "js"
-			BlockType.FORM -> "html"
+
+			BlockType.FORM -> "json"
+
 			BlockType.INPUT_DATA -> when (b.inputFormat) {
 				InputFormatType.JSON -> "json"
 				InputFormatType.XML -> "xml"
@@ -1297,6 +1389,56 @@ class MainApp : Application() {
 			else -> "txt"
 		}
 		return File(dir, "$base.$ext")
+	}
+
+
+	private fun codeFileForPreProcessing(b: CoreBlock): File {
+		if (currentProjectFile == null) {
+			val fc = FileChooser().apply {
+				title = "Сохранить процесс"
+				extensionFilters += FileChooser.ExtensionFilter("JSON Files", "*.json")
+			}
+			val project = collectCoreProject()
+			fc.showSaveDialog(stage)?.let { f ->
+				projectRepo.saveProject(f, project)
+				currentProjectFile = f
+			}
+		}
+		val parentFile = currentProjectFile?.parentFile
+		val nameWithoutExtension = currentProjectFile?.nameWithoutExtension
+		val dir = File(parentFile, "${nameWithoutExtension}_resources").apply { mkdirs() }
+		val base = "${b.id}_preprocessing"
+		return File(dir, "$base.groovy")
+	}
+
+
+	private fun codeFileForPostProcessing(b: CoreBlock, action: String? = null, type: String = "main"): File {
+		if (currentProjectFile == null) {
+			val fc = FileChooser().apply {
+				title = "Сохранить процесс"
+				extensionFilters += FileChooser.ExtensionFilter("JSON Files", "*.json")
+			}
+			val project = collectCoreProject()
+			fc.showSaveDialog(stage)?.let { f ->
+				projectRepo.saveProject(f, project)
+				currentProjectFile = f
+			}
+		}
+		val parentFile = currentProjectFile?.parentFile
+		val nameWithoutExtension = currentProjectFile?.nameWithoutExtension
+		val dir = File(parentFile, "${nameWithoutExtension}_resources").apply { mkdirs() }
+
+		// если action не указан — старое поведение (один файл postprocessing)
+		val fileName = if (action == null) {
+			"${b.id}_postprocessing.groovy"
+		} else {
+			when (type) {
+				"main" -> "${b.id}_post_action_${action}.groovy"
+				"submit" -> "${b.id}_on_submit_${action}.groovy"
+				else -> "${b.id}_postprocessing.groovy"
+			}
+		}
+		return File(dir, fileName)
 	}
 
 
@@ -1395,7 +1537,9 @@ class MainApp : Application() {
 		blocks.forEach { block ->
 			if (block.core.type in arrayOf(BlockType.PROPERTIES, BlockType.SUB_PROCESS)) return@forEach
 			outputsMap[block.core.id.toString()]?.let { list ->
-				block.core.outputsData = list.map { it.toMutableMap() }.toMutableList() as MutableList<MutableMap<String, Any?>>
+				block.core.outputsData = list
+					.map { it.toMutableMap() }
+					.toMutableList() as MutableList<MutableMap<String, Any?>>
 			}
 		}
 	}
@@ -1575,7 +1719,11 @@ class MainApp : Application() {
 			val mode = gateModeCombo.value
 			conn.gate = when (mode) {
 				GateMode.WHEN_KEY_PRESENT -> EdgeGate(mode, key = keyField.text.ifBlank { null })
-				GateMode.WHEN_EQUALS -> EdgeGate(mode, key = keyField.text.ifBlank { null }, equals = equalsField.text.ifBlank { null })
+				GateMode.WHEN_EQUALS -> EdgeGate(
+					mode,
+					key = keyField.text.ifBlank { null },
+					equals = equalsField.text.ifBlank { null })
+
 				else -> EdgeGate(mode)
 			}
 		}
@@ -1591,8 +1739,8 @@ class MainApp : Application() {
 				dialog.close()
 			}
 		}
-
-		val layout = VBox(10.0,
+		val layout = VBox(
+			10.0,
 			HBox(10.0, Label("Тип входных данных:"), incomeTypeCombo),
 			HBox(10.0, Label("Gate режим:"), gateModeCombo),
 			HBox(10.0, Label("Ключ:"), keyField),
@@ -1608,7 +1756,6 @@ class MainApp : Application() {
 		dialog.initModality(Modality.WINDOW_MODAL)
 		dialog.show()
 	}
-
 
 
 	companion object {

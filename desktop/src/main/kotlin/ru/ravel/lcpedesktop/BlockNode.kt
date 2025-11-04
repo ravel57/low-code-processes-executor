@@ -43,6 +43,10 @@ class BlockNode(
 	// внешние зависимости
 	var loadCode: (CoreBlock) -> String = { "" },
 	var saveCode: (CoreBlock, String) -> Unit = { _, _ -> },
+	var loadPreProcessingCode: (CoreBlock) -> String = { "" },
+	var loadPostProcessingCode: (CoreBlock, String, String) -> String = { _, _, _ -> "" },
+	var savePreProcessingCode: (CoreBlock, String) -> Unit = { _, _ -> },
+	var savePostProcessingCode: (CoreBlock, String, String, String) -> Unit = { _, _, _, _ -> },
 	private var callbacks: BlockNodeCallbacks = BlockNodeCallbacks(),
 ) : Pane() {
 
@@ -229,6 +233,85 @@ class BlockNode(
 			return Tab("Код", VBox(codeScroll)).apply { isClosable = false }
 		}
 
+		fun makePreProcessingTab(): Tab {
+			val codeArea = CodeArea().apply {
+				replaceText(loadPreProcessingCode(core))
+				paragraphGraphicFactory = LineNumberFactory.get(this)
+				isWrapText = true
+				contextMenu = createCodeAreaContextMenu(this)
+				style = "-fx-font-size: 16px; -fx-font-family: 'Consolas', 'monospace';"
+			}
+			val codeScroll = VirtualizedScrollPane(codeArea)
+			VBox.setVgrow(codeScroll, Priority.ALWAYS)
+			return Tab("PreProcessing", VBox(codeScroll)).apply { isClosable = false }
+		}
+
+		fun makePostProcessingTab(): Tab {
+			val codeAreasBox = VBox(16.0)
+			val baseCode = loadCode(core)
+
+			// --- 1. Парсим JSON и собираем все действия ("action") ---
+			val actions = try {
+				val root = ObjectMapper().readTree(baseCode)
+				val children = root.get("children")
+				children?.flatMap { ch ->
+					val act = ch.get("action")?.asText()
+					if (act != null) listOf(act) else emptyList()
+				} ?: emptyList()
+			} catch (_: Exception) {
+				emptyList()
+			}
+
+			val allActions = actions.ifEmpty { listOf("default") }
+
+			// --- 2. Создаём по 2 CodeArea для каждого action ---
+			allActions.forEach { act ->
+				val lblMain = Label("Postprocessing для действия: $act")
+				val lblSubmit = Label("Данные в функцию submit")
+
+				// Основное поле (используем переданную функцию loadPostProcessingCode)
+				val codeAreaMain = CodeArea().apply {
+					replaceText(loadPostProcessingCode(core, act, "main"))
+					paragraphGraphicFactory = LineNumberFactory.get(this)
+					isWrapText = true
+					contextMenu = createCodeAreaContextMenu(this)
+					style = "-fx-font-size: 15px; -fx-font-family: 'Consolas', 'monospace';"
+				}
+
+				// Поле onSubmit — используем ту же логику, но можно сделать отдельное имя файла
+				val codeAreaSubmit = CodeArea().apply {
+					val submitFile = loadPostProcessingCode(core, act, "submit") // или отдельная loadSubmitCode(core)
+					replaceText(submitFile.ifBlank { "" })
+					paragraphGraphicFactory = LineNumberFactory.get(this)
+					isWrapText = true
+					contextMenu = createCodeAreaContextMenu(this)
+					style = "-fx-font-size: 15px; -fx-font-family: 'Consolas', 'monospace';"
+				}
+
+				val scrollMain = VirtualizedScrollPane(codeAreaMain).apply { VBox.setVgrow(this, Priority.ALWAYS) }
+				val scrollSubmit = VirtualizedScrollPane(codeAreaSubmit).apply { VBox.setVgrow(this, Priority.ALWAYS) }
+				val mainBox = VBox(6.0, lblMain, scrollMain).apply {
+					VBox.setVgrow(scrollMain, Priority.ALWAYS)
+					prefWidth = 0.5
+				}
+				val submitBox = VBox(6.0, lblSubmit, scrollSubmit).apply {
+					VBox.setVgrow(scrollSubmit, Priority.ALWAYS)
+					prefWidth = 0.5
+				}
+				val row = HBox(12.0, mainBox, submitBox).apply {
+					HBox.setHgrow(mainBox, Priority.ALWAYS)
+					HBox.setHgrow(submitBox, Priority.ALWAYS)
+					alignment = Pos.TOP_CENTER
+				}
+				codeAreasBox.children += row
+			}
+
+			return Tab("PostProcessing", ScrollPane(codeAreasBox).apply {
+				isFitToWidth = true
+				prefHeight = 600.0
+			}).apply { isClosable = false }
+		}
+
 		fun makeFormatTab(): Tab {
 			val group = ToggleGroup()
 			val radios = InputFormatType.entries.map { fmt ->
@@ -254,13 +337,11 @@ class BlockNode(
 		fun makeSubProjectPropsTab(): Tab? {
 			val path = core.subProjectPath
 			val app = (scene?.window?.userData as? MainApp)
-			val projectFile = (app?.resolveProjectFile(path)
-				?: File(path)).normalize()
+			val projectFile = (app?.resolveProjectFile(path) ?: File(path)).normalize()
 			if (!projectFile.exists()) {
 				return null
 			}
 			val baseDir = projectFile.parentFile
-
 			val mapper = ObjectMapper().findAndRegisterModules()
 			val root = try {
 				mapper.readTree(projectFile)
@@ -268,15 +349,15 @@ class BlockNode(
 				return null
 			}
 			val blocksNode = root.get("blocks") ?: return null
-
 			// 1) Соберём все PROPERTIES
 			val propsBlocks: MutableList<JsonNode> = mutableListOf()
 			blocksNode.forEach { b ->
 				val t: String? = b.get("type")?.asText() ?: b.get("blockType")?.asText()
 				if (t == "PROPERTIES") propsBlocks.add(b)
 			}
-			if (propsBlocks.isEmpty()) return null
-
+			if (propsBlocks.isEmpty()) {
+				return null
+			}
 			// 2) Выберем «правильный» PROPERTIES:
 			//    приоритет — совпадение имени с именем SUB_PROJECT блока
 			val selected = propsBlocks.firstOrNull { pb ->
@@ -368,7 +449,10 @@ class BlockNode(
 				// --- СБОР ИМЁН ДЛЯ UI ---
 				val names: List<String> = when {
 					core.outputNames.isNotEmpty() -> core.outputNames
-					core.outputsData.isNotEmpty() -> core.outputsData.mapIndexed { idx, m -> m.keys.firstOrNull() ?: "prop$idx" }
+					core.outputsData.isNotEmpty() -> core.outputsData.mapIndexed { idx, m ->
+						m.keys.firstOrNull() ?: "prop$idx"
+					}
+
 					core.subProjectProps.isNotEmpty() -> core.subProjectProps.keys.toList()
 					else -> emptyList()
 				}
@@ -398,7 +482,8 @@ class BlockNode(
 				val header = HBox(8.0, Label("Свойства:"), addBtn).apply { alignment = Pos.CENTER_LEFT }
 
 				val propsTab = Tab(
-					"Свойства", VBox(6.0, header,
+					"Свойства", VBox(
+						6.0, header,
 						ScrollPane(rows).apply { isFitToWidth = true; prefHeight = 240.0 })
 				).apply { isClosable = false }
 
@@ -408,6 +493,11 @@ class BlockNode(
 			BlockType.SUB_PROCESS -> {
 				val tabPane = TabPane()
 				makeSubProjectPropsTab()?.let { tabPane.tabs += it }
+				tabPane
+			}
+
+			BlockType.FORM -> {
+				val tabPane = TabPane(makeCodeTab(), makeIOTab(), makePreProcessingTab(), makePostProcessingTab())
 				tabPane
 			}
 
@@ -426,10 +516,34 @@ class BlockNode(
 			setOnAction {
 				core.name = titleText.text
 				label.text = core.name
+				// TODO Переписать то что тут ***
 				tabs?.tabs?.firstOrNull { it.text == "Код" }?.let { codeTab ->
-					val codeArea = (((codeTab.content as VBox).children[0]) as VirtualizedScrollPane<*>).content as CodeArea
+					val codeArea =
+						(((codeTab.content as VBox).children[0]) as VirtualizedScrollPane<*>).content as CodeArea
 					saveCode(core, codeArea.text)
 				}
+				tabs?.tabs?.firstOrNull { it.text == "PreProcessing" }?.let { codeTab ->
+					val codeArea =
+						(((codeTab.content as VBox).children[0]) as VirtualizedScrollPane<*>).content as CodeArea
+					savePreProcessingCode(core, codeArea.text)
+				}
+				tabs?.tabs?.firstOrNull { it.text == "PostProcessing" }?.let { tab ->
+					val rootBox = ((tab.content as ScrollPane).content as VBox)
+					rootBox.children.filterIsInstance<VBox>().forEach { vb ->
+						val labels = vb.children.filterIsInstance<Label>()
+						val scrolls = vb.children.filterIsInstance<VirtualizedScrollPane<*>>()
+						if (labels.size == 2 && scrolls.size == 2) {
+							val codeMain = (scrolls[0].content as? CodeArea)?.text ?: ""
+							val codeSubmit = (scrolls[1].content as? CodeArea)?.text ?: ""
+							val lbl = vb.children.filterIsInstance<Label>().firstOrNull()
+							val act = lbl?.text?.substringAfter(": ")?.trim() ?: "default"
+							// сохраняем через переданные лямбды
+							savePostProcessingCode(core, codeMain, act, "main")
+							savePostProcessingCode(core, codeSubmit, act, "submit")
+						}
+					}
+				}
+				// TODO Переписать то что тут ***
 				if (core.type == BlockType.PROPERTIES) {
 					val tab = tabs?.tabs?.firstOrNull { it.text == "Свойства" }
 					if (tab != null) {
@@ -666,8 +780,11 @@ class BlockNode(
 
 	private fun buildEditableOutputsBox(): VBox {
 		val rows = VBox(4.0)
-		val scroll =
-			ScrollPane(rows).apply { prefHeight = 180.0; isFitToWidth = true; vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS }
+		val scroll = ScrollPane(rows).apply {
+			prefHeight = 180.0
+			isFitToWidth = true
+			vbarPolicy = ScrollPane.ScrollBarPolicy.ALWAYS
+		}
 		core.outputNames.forEach { addOutputRow(rows, it) }
 		if (rows.children.isEmpty()) addOutputRow(rows)
 		val addBtn = Button("+").apply { setOnAction { addOutputRow(rows) } }

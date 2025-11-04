@@ -67,6 +67,12 @@ data class CoreBlock @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) constructo
 
 	@JsonProperty("groovyClassName")
 	var groovyClassName: String? = null,
+
+	@JsonProperty("preProcessingCode")
+	var preProcessingCodePath: String? = null,
+
+	@JsonProperty("postProcessingCode")
+	var postProcessingCodePath: String? = null,
 ) {
 
 	@JsonIgnore

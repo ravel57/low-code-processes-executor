@@ -1,4 +1,4 @@
-package ru.ravel.lcpecore.runtime
+package ru.ravel.lcpecore.util
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
@@ -19,6 +19,9 @@ object InputParsers {
 			}
 			InputFormatType.PROTOBUF -> {
 				mutableMapOf("_error" to "PROTOBUF not implemented")
+			}
+			InputFormatType.TOML -> {
+				mutableMapOf("_error" to "TOML not implemented")
 			}
 		}
 	} catch (e: Exception) {

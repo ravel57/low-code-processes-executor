@@ -83,7 +83,7 @@ object DexCompiler {
 			?.firstOrNull { it.exists() }
 			?: throw IllegalStateException("Не найден d8 в $buildToolsDir")
 		// --- android.jar (для --lib) ---
-		val androidJar = listOf(34, 33, 32, 31, 30, 29, 28, 27, 26)
+		val androidJar = listOf(36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26)
 			.asSequence()
 			.map { File(androidHome, "platforms/android-$it/android.jar") }
 			.firstOrNull { it.exists() }

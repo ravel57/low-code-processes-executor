@@ -4,6 +4,7 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import kotlinx.coroutines.*
 import ru.ravel.lcpecore.graph.CycleDetector
 import ru.ravel.lcpecore.model.*
+import ru.ravel.lcpecore.util.InputParsers
 import java.io.File
 import java.math.BigDecimal
 import java.math.BigInteger
@@ -101,8 +102,8 @@ class EngineRunner(
 	@Suppress("UNCHECKED_CAST")
 	private fun deepCopyAny(v: Any?): Any? {
 		return when (v) {
-			is Map<*, *> -> (v as Map<String, Any?>).entries
-				.associate { (k, vv) -> k to deepCopyAny(vv) }
+			is Map<*, *> -> v.entries
+				.associate { (k, vv) -> (k?.toString() ?: "") to deepCopyAny(vv) }
 				.toMutableMap()
 
 			is Collection<*> -> v.map { deepCopyAny(it) }.toMutableList()
@@ -680,19 +681,22 @@ class EngineRunner(
 			listeners.forEach { it.onError(block, t) }
 			throw t
 		} finally {
+			// 1) Зафиксировали версии и фазы под локом
 			synchronizedBlock(block.id) {
 				val vers = outputVersion.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
 				block.outputsData.forEachIndexed { i, out ->
-					val nonEmpty = !isEffectivelyEmptyMap(out)
-					if (nonEmpty) {
+					if (!isEffectivelyEmptyMap(out)) {
 						val newVer = globalTick.incrementAndGet()
 						vers[i] = newVer
 						val phaseList = versionPhase.computeIfAbsent(block.id) { MutableList(block.outputCount) { 0L } }
 						phaseList[i] = currentPhase.get()
-						blockReadySignal.remove(block.id)?.complete(Unit)
 					}
 				}
 			}
+			// 2) ВЫСЫЛАЕМ СИГНАЛ ВСЕГДА и ОДИН РАЗ, уже вне лока
+			blockReadySignal.remove(block.id)?.complete(Unit)
+
+			// 3) Будим всех, кто ждал конкретной версии
 			versionReady.compute(block.id) { _, p ->
 				p?.forEach { it.complete(Unit) }
 				mutableListOf()

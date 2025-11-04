@@ -5,4 +5,5 @@ enum class InputFormatType {
 	XML,
 	YAML,
 	PROTOBUF,
+	TOML,
 }
