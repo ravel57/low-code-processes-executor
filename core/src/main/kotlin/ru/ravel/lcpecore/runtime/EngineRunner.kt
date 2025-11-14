@@ -48,7 +48,6 @@ class EngineRunner(
 	private val blockReadySignal = ConcurrentHashMap<UUID, CompletableDeferred<Unit>>()
 
 
-
 	private fun edgeKey(c: CoreConnection): UUID {
 		return UUID.nameUUIDFromBytes("${c.fromId}:${c.fromOutputId}:${c.toId}:${c.toInputId}".toByteArray())
 	}
@@ -249,7 +248,7 @@ class EngineRunner(
 
 		// расстояние от якорей — для стабильного порядка показа форм
 		val dist = mutableMapOf<UUID, Int>()
-		val q: ArrayDeque<CoreBlock> = ArrayDeque()
+		val q = ArrayDeque<CoreBlock>()
 		anchors.forEach { a -> dist[a.id] = 0; q.add(a) }
 		while (q.isNotEmpty()) {
 			val u = q.removeFirst()
@@ -322,7 +321,8 @@ class EngineRunner(
 			pending[b] = AtomicInteger(need)
 			if (need == 0) {
 				val hasOptional = inAll.any { it.conn.incomeDataType == IncomeDataType.OPTIONAL }
-				val hasFreshOptional = inAll.any { it.conn.incomeDataType == IncomeDataType.OPTIONAL && edgeFreshFor(b, it) }
+				val hasFreshOptional =
+					inAll.any { it.conn.incomeDataType == IncomeDataType.OPTIONAL && edgeFreshFor(b, it) }
 				val noRequired = requiredIncomingCount[b] == 0
 				if (noRequired && hasOptional && !hasFreshOptional) {
 					// ждём первого свежего опционального входа
@@ -430,8 +430,11 @@ class EngineRunner(
 
 							IncomeDataType.REQUIRED_DATA,
 							IncomeDataType.REQUIRED_FRESH_DATA,
-							-> {
-								if (readyNow(child) && !scheduledMap.containsKey(child.id) && !ranThisPhase.contains(child.id)) {
+								-> {
+								if (readyNow(child) && !scheduledMap.containsKey(child.id) && !ranThisPhase.contains(
+										child.id
+									)
+								) {
 									enqueueReady(child)
 								}
 							}
@@ -639,7 +642,7 @@ class EngineRunner(
 					val specJson = readCode(block, project)
 					val initial = inputs.toMutableMap()
 					formPauseOn()
-					val submitted = try {
+					val submittedRaw = try {
 						awaitForm(block, specJson, initial)
 					} finally {
 						formPauseOff()
@@ -647,6 +650,62 @@ class EngineRunner(
 						breakPhaseAfterForm.set(true)
 					}
 
+					// --- NEW: постобработка через postProcessingNodes ---
+					@Suppress("UNCHECKED_CAST")
+					val submitted = submittedRaw.toMutableMap()
+
+					// 1) Определяем action
+					val actionFromPayload = sequenceOf("action", "_action", "submitAction")
+						.mapNotNull { key -> (submitted[key] as? String)?.takeIf { it.isNotBlank() } }
+						.firstOrNull()
+
+					val action = actionFromPayload
+						?: block.postProcessingNodes.firstOrNull()?.action
+
+					if (action != null && block.postProcessingNodes.isNotEmpty()) {
+						val node = block.postProcessingNodes.firstOrNull { it.action == action }
+							?: block.postProcessingNodes.first()
+
+						fun readPostProcessingCode(path: String?): String {
+							if (path.isNullOrBlank()) return ""
+							val base = project.baseDir ?: File(".")
+							val normalized = path.replace('\\', '/')
+							val file = File(normalized).let { f ->
+								if (f.isAbsolute) f else File(base, normalized)
+							}.normalize()
+							if (!file.exists() || !file.isFile) return ""
+							return file.readText()
+						}
+
+						fun runHandler(codePath: String?, className: String?) {
+							val code = readPostProcessingCode(codePath)
+							val cls = className?.trim().orEmpty()
+							if (code.isBlank() || cls.isBlank()) return
+							val exec = requireNotNull(groovy) { "GroovyExecutor is not provided" }
+							// Контекст для обработчика
+							val inout = inputs.mapValues { (_, v) -> deepCopyMap(v) }
+							val ret = exec.exec(code, inout, cls)
+//							// Приоритетно берём изменённый inout["form"], если нет — Map из ret
+//							val modified: Map<String, Any?>? = when {
+//								inout["form"] is Map<*, *> ->
+//									inout["form"] as Map<String, Any?>
+//
+//								ret is Map<*, *> ->
+//									ret as Map<String, Any?>
+//
+//								else -> null
+//							}
+//
+//							if (modified != null) {
+//								submitted.clear()
+//								submitted.putAll(modified)
+//							}
+						}
+
+						// сначала постобработка, потом подготовка данных к submit (если нужна)
+						runHandler(node.mainProcessingCodePath, node.mainProcessingClassName)
+						runHandler(node.submitDataCodePath, node.submitDataClassName)
+					}
 					when {
 						block.outputNames.isEmpty() -> {
 							listOf(submitted.toMutableMap())
@@ -665,7 +724,8 @@ class EngineRunner(
 
 						else -> {
 							val first = submitted.toMutableMap()
-							val rest = List((block.outputNames.size - 1).coerceAtLeast(0)) { mutableMapOf<String, Any?>() }
+							val rest =
+								List((block.outputNames.size - 1).coerceAtLeast(0)) { mutableMapOf<String, Any?>() }
 							listOf(first) + rest
 						}
 					}

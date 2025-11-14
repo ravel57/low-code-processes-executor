@@ -3,8 +3,8 @@ package ru.ravel.lcpedesktop.android
 import groovy.lang.GroovyClassLoader
 import org.codehaus.groovy.control.CompilerConfiguration
 import ru.ravel.lcpecore.model.CoreBlock
+import ru.ravel.lcpecore.model.PostProcessingNode
 import java.io.File
-import java.io.FileOutputStream
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
 
@@ -13,17 +13,86 @@ object GroovyJarCompiler {
 	/**
 	 * Компилирует groovy-скрипт в JAR.
 	 */
-	fun compileToJar(script: String, block: CoreBlock, outputDir: File): File {
-		val fqcn = block.groovyClassName?.takeIf { it.isNotBlank() }
-			?: "ru.ravel.scripts.GroovyBlock_${block.id.toString().replace("-", "")}"
-				.also { block.groovyClassName = it }
-		val className = "GroovyBlock_${block.id.toString().replace("-", "")}"
-		val groovySource = wrapGroovySource(className, script, block.inputNames, block.outputNames)
-		val simpleName = fqcn.substringAfterLast('.')
-		val jarFile = File(outputDir, "$simpleName.jar")
+	fun compileToJar(
+		script: String,
+		block: CoreBlock,
+		outputDir: File,
+		compileFormCode: String? = null,
+		blockNode: PostProcessingNode? = null,
+		isNeedReturn: Boolean = false,
+	): File {
+		// 1. FQCN и имя класса
+		val fqcn = if (compileFormCode == null) {
+			block.groovyClassName?.takeIf { it.isNotBlank() }
+				?: "ru.ravel.scripts.GroovyBlock_${block.id.toString().replace("-", "")}"
+					.also { block.groovyClassName = it }
+		} else {
+			when (compileFormCode) {
+				"mainProcessing" -> blockNode?.mainProcessingClassName
+				"submitData" -> blockNode?.submitDataClassName
+				else -> null
+			} ?: throw IllegalArgumentException("compileFormCode must be specified correctly")
+		}
 
+		val className = if (compileFormCode == null) {
+			"GroovyBlock_${block.id.toString().replace("-", "")}"
+		} else {
+			when (compileFormCode) {
+				"mainProcessing" -> "GroovyBlock_${blockNode?.mainProcessingUuid?.replace("-", "")}"
+				"submitData" -> "GroovyBlock_${blockNode?.submitDataUuid?.replace("-", "")}"
+				else -> throw IllegalArgumentException("compileFormCode must be specified correctly")
+			}
+		}
+		val groovySource = if (compileFormCode == null) {
+			wrapGroovySource(
+				className,
+				script,
+				block.inputNames,
+				block.outputNames
+			)
+		} else {
+			wrapGroovySourceForFormSubmitProcessing(
+				className,
+				script,
+				block.inputNames,
+				block.outputNames,
+				isNeedReturn
+			)
+		}
+		val simpleName = fqcn.substringAfterLast('.')
+		// 2. Абсолютный каталог вывода + гарантированное создание
+		val outDirAbs = outputDir.absoluteFile
+		if (!outDirAbs.exists()) {
+			val ok = outDirAbs.mkdirs()
+			if (!ok && !outDirAbs.exists()) {
+				throw IllegalStateException("Не удалось создать каталог сборки: ${outDirAbs.absolutePath}")
+			}
+		}
+		val jarFile = File(outDirAbs, "$simpleName.jar").absoluteFile
+		val jarParent = jarFile.parentFile
+			?: throw IllegalStateException("У файла JAR нет родительского каталога: ${jarFile.path}")
+		if (!jarParent.exists()) {
+			val ok = jarParent.mkdirs()
+			if (!ok && !jarParent.exists()) {
+				throw IllegalStateException("Не удалось создать каталог для JAR: ${jarParent.absolutePath}")
+			}
+		}
+		println(
+			"== GroovyJarCompiler ==\n" +
+					"  outDirAbs    = ${outDirAbs.absolutePath}\n" +
+					"  jarFile      = ${jarFile.absolutePath}\n" +
+					"  jarParent    = ${jarParent.absolutePath}\n" +
+					"  existsDir    = ${jarParent.exists()}\n" +
+					"  canWriteDir  = ${jarParent.canWrite()}\n" +
+					"  isDir        = ${jarParent.isDirectory}"
+		)
+		// 3. Компиляция groovy в .class
 		val config = CompilerConfiguration().apply {
-			targetDirectory = File("build/tmp/groovy-classes")
+			// делаем targetDirectory тоже абсолютным, чтобы исключить сюрпризы с CWD
+			targetDirectory = File(outDirAbs, "groovy-classes").absoluteFile
+			if (!targetDirectory.exists()) {
+				targetDirectory.mkdirs()
+			}
 			targetBytecode = "8"
 			optimizationOptions["indy"] = false
 		}
@@ -34,25 +103,50 @@ object GroovyJarCompiler {
 		if (!classFile.exists()) {
 			throw IllegalStateException("Не найден .class: ${classFile.absolutePath}")
 		}
-		jarFile.parentFile?.mkdirs()
-
-		// собираем JAR только с нашим классом
-		JarOutputStream(FileOutputStream(jarFile)).use { jar ->
-			val added = mutableSetOf<String>()
-			config.targetDirectory
-				.walkTopDown()
-				.filter { it.isFile && it.extension == "class" }
-				.forEach { file ->
-					val relPath = file.relativeTo(config.targetDirectory).invariantSeparatorsPath
-					if (relPath.startsWith("ru/ravel/scripts/${className}")) {
-						if (added.add(relPath)) {
-							val entry = JarEntry(relPath)
-							jar.putNextEntry(entry)
-							jar.write(file.readBytes())
-							jar.closeEntry()
+		// 4. Сборка JAR — через NIO, с дополнительной диагностикой
+		try {
+			// на всякий случай: если вдруг уже что-то есть и это директория
+			if (jarFile.exists() && jarFile.isDirectory) {
+				throw IllegalStateException("По пути JAR находится каталог, а не файл: ${jarFile.absolutePath}")
+			}
+			// создаём/очищаем файл через NIO
+			val path = jarFile.toPath()
+			val fos = java.nio.file.Files.newOutputStream(
+				path,
+				java.nio.file.StandardOpenOption.CREATE,
+				java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+				java.nio.file.StandardOpenOption.WRITE
+			)
+			JarOutputStream(fos).use { jar ->
+				val added = mutableSetOf<String>()
+				config.targetDirectory
+					.walkTopDown()
+					.filter { it.isFile && it.extension == "class" }
+					.forEach { file ->
+						val relPath = file
+							.relativeTo(config.targetDirectory)
+							.invariantSeparatorsPath
+						if (relPath.startsWith("ru/ravel/scripts/$className")) {
+							if (added.add(relPath)) {
+								val entry = JarEntry(relPath)
+								jar.putNextEntry(entry)
+								jar.write(file.readBytes())
+								jar.closeEntry()
+							}
 						}
 					}
-				}
+			}
+		} catch (e: Exception) {
+			System.err.println(
+				"Ошибка при записи JAR:\n" +
+						"  jarFile      = ${jarFile.absolutePath}\n" +
+						"  jarExists    = ${jarFile.exists()}\n" +
+						"  jarIsDir     = ${jarFile.isDirectory}\n" +
+						"  parentExists = ${jarParent.exists()}\n" +
+						"  parentIsDir  = ${jarParent.isDirectory}\n" +
+						"  parentCanWrite = ${jarParent.canWrite()}"
+			)
+			throw e
 		}
 		println("JAR создан (только скрипт): ${jarFile.absolutePath}")
 		return jarFile
@@ -90,6 +184,43 @@ object GroovyJarCompiler {
 	        |        $fixedBody
 	        |
 	        |        return [$outputReturn]
+	        |    }
+	        |}
+	        """.trimMargin()
+	}
+
+
+	private fun wrapGroovySourceForFormSubmitProcessing(
+		className: String,
+		script: String,
+		inputs: List<String>,
+		outputs: List<String>,
+		isNeedReturn: Boolean,
+	): String {
+		val lines = script.lines()
+		val imports = lines.filter { it.trim().startsWith("import ") }
+			.joinToString("\n")
+		val inputDecls = inputs.joinToString("\n        ") { nm -> "def $nm = inputs[\"$nm\"]" }
+		val outputDecls = outputs.joinToString("\n        ") { nm -> "def $nm = [:]" }
+		val body = lines.filterNot { it.trim().startsWith("import ") }
+			.joinToString("\n")
+			.ifBlank { "[:]" }
+		val fixedBody = fixForAndroid(body, inputs, outputs)
+		return """
+	        |package ru.ravel.scripts
+	        |
+	        |@GrabConfig(initContextClass=false)
+	        |import groovy.transform.CompileDynamic
+	        |$imports
+			|
+	        |class $className {
+	        |    @CompileDynamic
+	        |    static Map<String,Object> run(Map<String,Object> inputs) {
+	        |        $inputDecls
+	        |        $outputDecls
+			|
+	        |        ${if (isNeedReturn) "return" else ""} $fixedBody
+			|        ${if (!isNeedReturn) "return [:]" else ""}
 	        |    }
 	        |}
 	        """.trimMargin()

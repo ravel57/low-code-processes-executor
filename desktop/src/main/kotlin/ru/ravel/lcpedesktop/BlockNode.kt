@@ -247,22 +247,68 @@ class BlockNode(
 		}
 
 		fun makePostProcessingTab(): Tab {
+			if (core.postProcessingNodes.isEmpty()) {
+				val app = scene?.window?.userData as? MainApp
+				val currentFile = app?.currentProjectFile
+				if (currentFile != null) {
+//					val resDir = File(
+//						currentFile.parentFile,
+//						"${currentFile.nameWithoutExtension}_resources"
+//					)
+//					val actions = mutableListOf<PostProcessingNode>()
+//					resDir.listFiles()?.forEach { f ->
+//						if (f.nameWithoutExtension in core.postProcessingNodes.map { it.submitDataUuid }) {
+//							val node = actions.find { it.action == action } ?: PostProcessingNode(
+//								action = action,
+//								mainProcessingUuid = null,
+//								submitDataUuid = null,
+//								mainProcessingClassName = "",
+//								submitDataClassName = "",
+//							)
+//							if (type == "post_action") {
+//								node.mainProcessingUuid = f.name
+//							}
+//							if (type == "on_submit") {
+//								node.submitDataUuid = f.name
+//							}
+//							if (actions.none { it.action == action }) {
+//								actions += node
+//							}
+//						}
+//					}
+//					core.postProcessingNodes = actions
+				}
+			}
 			val codeAreasBox = VBox(16.0)
 			val baseCode = loadCode(core)
 
 			// --- 1. Парсим JSON и собираем все действия ("action") ---
+			val submitActions = try {
+				val root = ObjectMapper().readTree(baseCode)
+				val children = root.get("children")
+				children
+					?.flatMap { ch ->
+						val act = ch.get("submitAction")?.asText()
+						if (act != null) listOf(act) else emptyList()
+					}
+					?: emptyList()
+			} catch (_: Exception) {
+				emptyList()
+			}
 			val actions = try {
 				val root = ObjectMapper().readTree(baseCode)
 				val children = root.get("children")
-				children?.flatMap { ch ->
-					val act = ch.get("action")?.asText()
-					if (act != null) listOf(act) else emptyList()
-				} ?: emptyList()
+				children
+					?.flatMap { ch ->
+						val act = ch.get("action")?.asText()
+						if (act != null) listOf(act) else emptyList()
+					}
+					?: emptyList()
 			} catch (_: Exception) {
 				emptyList()
 			}
 
-			val allActions = actions.ifEmpty { listOf("default") }
+			val allActions = (submitActions + actions).ifEmpty { listOf("default") }
 
 			// --- 2. Создаём по 2 CodeArea для каждого action ---
 			allActions.forEach { act ->
@@ -280,16 +326,19 @@ class BlockNode(
 
 				// Поле onSubmit — используем ту же логику, но можно сделать отдельное имя файла
 				val codeAreaSubmit = CodeArea().apply {
-					val submitFile = loadPostProcessingCode(core, act, "submit") // или отдельная loadSubmitCode(core)
+					val submitFile = loadPostProcessingCode(core, act, "submit")
 					replaceText(submitFile.ifBlank { "" })
 					paragraphGraphicFactory = LineNumberFactory.get(this)
 					isWrapText = true
 					contextMenu = createCodeAreaContextMenu(this)
 					style = "-fx-font-size: 15px; -fx-font-family: 'Consolas', 'monospace';"
 				}
-
-				val scrollMain = VirtualizedScrollPane(codeAreaMain).apply { VBox.setVgrow(this, Priority.ALWAYS) }
-				val scrollSubmit = VirtualizedScrollPane(codeAreaSubmit).apply { VBox.setVgrow(this, Priority.ALWAYS) }
+				val scrollMain = VirtualizedScrollPane(codeAreaMain).apply {
+					VBox.setVgrow(this, Priority.ALWAYS)
+				}
+				val scrollSubmit = VirtualizedScrollPane(codeAreaSubmit).apply {
+					VBox.setVgrow(this, Priority.ALWAYS)
+				}
 				val mainBox = VBox(6.0, lblMain, scrollMain).apply {
 					VBox.setVgrow(scrollMain, Priority.ALWAYS)
 					prefWidth = 0.5
@@ -529,18 +578,30 @@ class BlockNode(
 				}
 				tabs?.tabs?.firstOrNull { it.text == "PostProcessing" }?.let { tab ->
 					val rootBox = ((tab.content as ScrollPane).content as VBox)
-					rootBox.children.filterIsInstance<VBox>().forEach { vb ->
-						val labels = vb.children.filterIsInstance<Label>()
-						val scrolls = vb.children.filterIsInstance<VirtualizedScrollPane<*>>()
-						if (labels.size == 2 && scrolls.size == 2) {
-							val codeMain = (scrolls[0].content as? CodeArea)?.text ?: ""
-							val codeSubmit = (scrolls[1].content as? CodeArea)?.text ?: ""
-							val lbl = vb.children.filterIsInstance<Label>().firstOrNull()
-							val act = lbl?.text?.substringAfter(": ")?.trim() ?: "default"
-							// сохраняем через переданные лямбды
-							savePostProcessingCode(core, codeMain, act, "main")
-							savePostProcessingCode(core, codeSubmit, act, "submit")
-						}
+					rootBox.children.filterIsInstance<HBox>().forEach { row ->
+						val mainBox = row.children[0] as VBox
+						val submitBox = row.children[1] as VBox
+						val lblMain = mainBox.children[0] as Label
+						val act = lblMain.text.substringAfter(": ").trim()
+
+						val codeMain = ((mainBox.children[1] as VirtualizedScrollPane<*>).content as CodeArea).text
+						val codeSubmit = ((submitBox.children[1] as VirtualizedScrollPane<*>).content as CodeArea).text
+
+						// Находим или создаём node для действия
+						val mainProcessingUuid = UUID.randomUUID().toString()
+						val submitDataUuid = UUID.randomUUID().toString()
+						val node = core.postProcessingNodes.find { it.action == act } ?: PostProcessingNode(
+							action = act,
+							mainProcessingUuid = mainProcessingUuid,
+							submitDataUuid = submitDataUuid,
+							mainProcessingClassName = "ru.ravel.scripts.GroovyBlock_${mainProcessingUuid.replace("-", "")}",
+							submitDataClassName = "ru.ravel.scripts.GroovyBlock_${submitDataUuid.replace("-", "")}",
+							mainProcessingCodePath = "",
+							submitDataCodePath = ""
+						).also { core.postProcessingNodes += it }
+
+						// Сохраняем коды и пути (MainApp.savePostProcessingCode обновит filePath)
+						savePostProcessingCode(core, codeMain, codeSubmit, act)
 					}
 				}
 				// TODO Переписать то что тут ***

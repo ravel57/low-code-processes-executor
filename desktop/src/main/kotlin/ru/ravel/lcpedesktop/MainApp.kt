@@ -481,14 +481,44 @@ class MainApp : Application() {
 							GroovyJarCompiler.compileToJar(
 								script = code,
 								block = b,
-								outputDir = outputDir
+								outputDir = outputDir,
 							)
 						}
+				}
+				val formBlocks = all.filter { it.block.type == BlockType.FORM }
+				formBlocks.forEach { (_, b) ->
+					b.postProcessingNodes.onEach { blockNode ->
+						blockNode.mainProcessingAbsolutePath
+							?.takeIf { it.exists() }
+							?.readText()
+							?.let { code ->
+								GroovyJarCompiler.compileToJar(
+									script = code,
+									block = b,
+									outputDir = outputDir,
+									compileFormCode = "mainProcessing",
+									blockNode = blockNode,
+									isNeedReturn = false,
+								)
+							}
+						blockNode.submitDataAbsolutePath
+							?.takeIf { it.exists() }
+							?.readText()
+							?.let { code ->
+								GroovyJarCompiler.compileToJar(
+									script = code,
+									block = b,
+									outputDir = outputDir,
+									compileFormCode = "submitData",
+									blockNode = blockNode,
+									isNeedReturn = true,
+								)
+							}
+					}
 				}
 				all.groupBy { it.file }.forEach { (file, list) ->
 					val proj = projectRepo.loadProject(file).apply { baseDir = file.parentFile }
 					val byId = proj.blocks.associateBy { it.id }
-
 					list.asSequence()
 						.filter { it.block.type == BlockType.MAPPING_GROOVY }
 						.mapNotNull { loc ->
@@ -497,7 +527,6 @@ class MainApp : Application() {
 						.forEach { (id, name) ->
 							byId[id]?.groovyClassName = name
 						}
-
 					projectRepo.saveProject(file, proj)
 				}
 				val mergedJar = File(outputDir, "all-blocks.jar")
@@ -762,23 +791,39 @@ class MainApp : Application() {
 				core.preProcessingCodePath = base.toPath().relativize(file.toPath()).toString().replace('\\', '/')
 				markDirty()
 			},
-			loadPostProcessingCode = { b, action, type ->
-				val resDir = File(
-					currentProjectFile?.parentFile,
-					"${currentProjectFile?.nameWithoutExtension}_resources"
-				).apply { mkdirs() }
-				val fileName = when (type) {
-					"main" -> "${b.id}_post_action_${action}.groovy"
-					"submit" -> "${b.id}_on_submit_${action}.groovy"
-					else -> ""
+			loadPostProcessingCode = { block, action, type ->
+				// Ищем ноду для нужного действия
+				val node = block.postProcessingNodes.find { it.action == action }
+				// Определяем путь
+				val relativePath = when (type) {
+					"main" -> node?.mainProcessingUuid
+					"submit" -> node?.submitDataUuid
+					else -> null
 				}
-				val f = File(resDir, fileName)
-				if (f.exists()) f.readText() else ""
+				if (relativePath.isNullOrBlank()) {
+					""
+				} else {
+					val baseDir = File(
+						currentProjectFile?.parentFile,
+						"${currentProjectFile?.nameWithoutExtension}_resources"
+					)
+					val file = File(baseDir, relativePath)
+					if (file.exists()) file.readText() else ""
+				}
 			},
-			savePostProcessingCode = { b, text, action, type ->
-				val f = codeFileForPostProcessing(b, action, type)  // см. шаг 3
-				f.writeText(text)
-				// ВАЖНО: не трогаем b.postProcessingCodePath — файлов теперь много.
+			savePostProcessingCode = { b, textCodeMain, textCodeSubmit, action ->
+				val codeFileForMain = codeFileForPostProcessing(b, action, "main")
+				codeFileForMain.writeText(textCodeMain)
+				currentProjectFile?.nameWithoutExtension?.let { curPrj ->
+					b.postProcessingNodes.find { it.action == action }?.mainProcessingCodePath =
+						codeFileForMain.toString().replace(codeFileForMain.toString().substringAfter(curPrj), "")
+				}
+				val codeFileForSubmit = codeFileForPostProcessing(b, action, "submit")
+				codeFileForSubmit.writeText(textCodeSubmit)
+				currentProjectFile?.nameWithoutExtension?.let { curPrj ->
+					b.postProcessingNodes.find { it.action == action }?.submitDataCodePath =
+						codeFileForSubmit.toString().replace(codeFileForSubmit.toString().substringAfter(curPrj), "")
+				}
 				markDirty()
 			},
 			callbacks = callbacks,
@@ -1167,24 +1212,43 @@ class MainApp : Application() {
 							base.toPath().relativize(file.toPath()).toString().replace('\\', '/')
 						markDirty()
 					},
-					loadPostProcessingCode = { b, action, type ->
-						val resDir = File(
-							currentProjectFile?.parentFile,
-							"${currentProjectFile?.nameWithoutExtension}_resources"
-						).apply { mkdirs() }
-
-						val fileName = when (type) {
-							"main" -> "${b.id}_post_action_${action}.groovy"
-							"submit" -> "${b.id}_on_submit_${action}.groovy"
-							else -> ""
+					loadPostProcessingCode = { block, action, type ->
+						// Ищем ноду для нужного действия
+						val node = block.postProcessingNodes.find { it.action == action }
+						// Определяем путь
+						val relativePath = when (type) {
+							"main" -> node?.mainProcessingCodePath
+							"submit" -> node?.submitDataCodePath
+							else -> null
 						}
-
-						val f = File(resDir, fileName)
-						if (f.exists()) f.readText() else ""
+						if (relativePath != null) {
+							val file = File(currentProjectFile?.parentFile, relativePath)
+							if (file.exists()) {
+								file.readText()
+							} else {
+								""
+							}
+						} else {
+							""
+						}
 					},
-					savePostProcessingCode = { core, text, action, type ->
-						val f = codeFileForPostProcessing(core, action, type)
-						f.writeText(text)
+					savePostProcessingCode = { b, textCodeMain, textCodeSubmit, action ->
+						val codeFileForMain = codeFileForPostProcessing(b, action, "main")
+						codeFileForMain.writeText(textCodeMain)
+						currentProjectFile?.nameWithoutExtension?.let { curPrj ->
+							b.postProcessingNodes.find { it.action == action }?.mainProcessingCodePath =
+								codeFileForMain.toString()
+									.removePrefix(codeFileForMain.toString().substringBefore(curPrj))
+									.replace("\\", "/")
+						}
+						val codeFileForSubmit = codeFileForPostProcessing(b, action, "submit")
+						codeFileForSubmit.writeText(textCodeSubmit)
+						currentProjectFile?.nameWithoutExtension?.let { curPrj ->
+							b.postProcessingNodes.find { it.action == action }?.submitDataCodePath =
+								codeFileForSubmit.toString()
+									.removePrefix(codeFileForSubmit.toString().substringBefore(curPrj))
+									.replace("\\", "/")
+						}
 						markDirty()
 					},
 					callbacks = callbacks,
@@ -1432,9 +1496,10 @@ class MainApp : Application() {
 		val fileName = if (action == null) {
 			"${b.id}_postprocessing.groovy"
 		} else {
+			val postProcessingNode = b.postProcessingNodes.find { it.action == action }
 			when (type) {
-				"main" -> "${b.id}_post_action_${action}.groovy"
-				"submit" -> "${b.id}_on_submit_${action}.groovy"
+				"main" -> "${postProcessingNode?.mainProcessingUuid}.groovy"
+				"submit" -> "${postProcessingNode?.submitDataUuid}.groovy"
 				else -> "${b.id}_postprocessing.groovy"
 			}
 		}
@@ -1595,9 +1660,12 @@ class MainApp : Application() {
 		projectFile: File,
 		visited: MutableSet<String> = mutableSetOf(),
 	): List<BlockLoc> {
-		if (!projectFile.exists()) return emptyList()
-		if (!visited.add(projectFile.absolutePath)) return emptyList()
-
+		if (!projectFile.exists()) {
+			return emptyList()
+		}
+		if (!visited.add(projectFile.absolutePath)) {
+			return emptyList()
+		}
 		val project = projectRepo.loadProject(projectFile).apply { baseDir = projectFile.parentFile }
 		val thisFile = projectFile
 		val acc = mutableListOf<BlockLoc>()
@@ -1605,6 +1673,12 @@ class MainApp : Application() {
 		project.blocks.forEach { b ->
 			b.codeAbsolutePath = b.codePath?.let { p ->
 				resolveStored(projectFile.parentFile, p)
+			}
+			b.postProcessingNodes.onEach { blockPostNode ->
+				blockPostNode.mainProcessingAbsolutePath =
+					resolveStored(projectFile.parentFile, blockPostNode.mainProcessingCodePath!!)
+				blockPostNode.submitDataAbsolutePath =
+					resolveStored(projectFile.parentFile, blockPostNode.submitDataCodePath!!)
 			}
 			acc.add(BlockLoc(thisFile, b))
 		}
@@ -1647,7 +1721,11 @@ class MainApp : Application() {
 
 	/** Десериализация: трактуем ведущий '/' как наш «относительный» префикс */
 	private fun resolveStored(base: File, stored: String): File {
-		val s = if (stored.startsWith("/")) stored.substring(1) else stored
+		val s = if (stored.startsWith("/")) {
+			stored.substring(1)
+		} else {
+			stored
+		}
 		val f = File(s)
 		return if (f.isAbsolute) {
 			f.normalize()

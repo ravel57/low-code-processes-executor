@@ -71,8 +71,9 @@ data class CoreBlock @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) constructo
 	@JsonProperty("preProcessingCode")
 	var preProcessingCodePath: String? = null,
 
-	@JsonProperty("postProcessingCode")
-	var postProcessingCodePath: String? = null,
+	@JsonProperty("postProcessing")
+	@JsonSetter(nulls = Nulls.AS_EMPTY)
+	var postProcessingNodes: List<PostProcessingNode> = emptyList(),
 ) {
 
 	@JsonIgnore
