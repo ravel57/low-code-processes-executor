@@ -230,8 +230,31 @@ class BlockNode(
 			}
 			val codeScroll = VirtualizedScrollPane(codeArea)
 			VBox.setVgrow(codeScroll, Priority.ALWAYS)
-			return Tab("Код", VBox(codeScroll)).apply { isClosable = false }
+			val root = if (core.type == BlockType.FORM) {
+				val taskTypeBox = ComboBox<String>().apply {
+					items.addAll("NORMAL", "SCAN")
+					value = core.taskType?.name?.lowercase()
+					tooltip = Tooltip("Тип задачи: NORMAL — обычная, SCAN — со штрихкодами")
+					prefWidth = 160.0
+
+					valueProperty().addListener { _, _, newValue ->
+						core.taskType = TaskType.valueOf(newValue.uppercase())
+					}
+				}
+
+				val topBar = HBox(8.0, Label("Тип задачи:"), taskTypeBox).apply {
+					padding = Insets(8.0)
+					alignment = Pos.CENTER_LEFT
+					style = "-fx-background-color: #f4f4f4;"
+				}
+
+				VBox(topBar, codeScroll)
+			} else {
+				VBox(codeScroll)
+			}
+			return Tab("Код", root).apply { isClosable = false }
 		}
+
 
 		fun makePreProcessingTab(): Tab {
 			val codeArea = CodeArea().apply {
@@ -565,15 +588,22 @@ class BlockNode(
 			setOnAction {
 				core.name = titleText.text
 				label.text = core.name
-				// TODO Переписать то что тут ***
+				// FIXME Переписать то что тут ниже
+				val i = if (core.type == BlockType.FORM) {
+					1
+				} else {
+					0
+				}
 				tabs?.tabs?.firstOrNull { it.text == "Код" }?.let { codeTab ->
 					val codeArea =
-						(((codeTab.content as VBox).children[0]) as VirtualizedScrollPane<*>).content as CodeArea
+						(((codeTab.content as VBox).children[i]) as VirtualizedScrollPane<*>).content as CodeArea
 					saveCode(core, codeArea.text)
 				}
 				tabs?.tabs?.firstOrNull { it.text == "PreProcessing" }?.let { codeTab ->
 					val codeArea =
 						(((codeTab.content as VBox).children[0]) as VirtualizedScrollPane<*>).content as CodeArea
+					val coreId = core.id.toString().replace("-", "")
+					core.preProcessingClassName = "ru.ravel.scripts.GroovyBlock_${coreId}_preprocessing"
 					savePreProcessingCode(core, codeArea.text)
 				}
 				tabs?.tabs?.firstOrNull { it.text == "PostProcessing" }?.let { tab ->
@@ -590,11 +620,12 @@ class BlockNode(
 						// Находим или создаём node для действия
 						val mainProcessingUuid = UUID.randomUUID().toString()
 						val submitDataUuid = UUID.randomUUID().toString()
+						val s = mainProcessingUuid.replace("-", "")
 						val node = core.postProcessingNodes.find { it.action == act } ?: PostProcessingNode(
 							action = act,
 							mainProcessingUuid = mainProcessingUuid,
 							submitDataUuid = submitDataUuid,
-							mainProcessingClassName = "ru.ravel.scripts.GroovyBlock_${mainProcessingUuid.replace("-", "")}",
+							mainProcessingClassName = "ru.ravel.scripts.GroovyBlock_$s",
 							submitDataClassName = "ru.ravel.scripts.GroovyBlock_${submitDataUuid.replace("-", "")}",
 							mainProcessingCodePath = "",
 							submitDataCodePath = ""
@@ -604,7 +635,7 @@ class BlockNode(
 						savePostProcessingCode(core, codeMain, codeSubmit, act)
 					}
 				}
-				// TODO Переписать то что тут ***
+				// TODO Переписать то что тут ниже
 				if (core.type == BlockType.PROPERTIES) {
 					val tab = tabs?.tabs?.firstOrNull { it.text == "Свойства" }
 					if (tab != null) {

@@ -5,6 +5,8 @@ import org.codehaus.groovy.control.CompilerConfiguration
 import ru.ravel.lcpecore.model.CoreBlock
 import ru.ravel.lcpecore.model.PostProcessingNode
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardOpenOption.*
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
 
@@ -30,6 +32,9 @@ object GroovyJarCompiler {
 			when (compileFormCode) {
 				"mainProcessing" -> blockNode?.mainProcessingClassName
 				"submitData" -> blockNode?.submitDataClassName
+				"preProcessing" -> block.preProcessingClassName
+					?: "ru.ravel.scripts.GroovyBlock_${block.id.toString().replace("-", "")}_preprocessing"
+
 				else -> null
 			} ?: throw IllegalArgumentException("compileFormCode must be specified correctly")
 		}
@@ -40,6 +45,7 @@ object GroovyJarCompiler {
 			when (compileFormCode) {
 				"mainProcessing" -> "GroovyBlock_${blockNode?.mainProcessingUuid?.replace("-", "")}"
 				"submitData" -> "GroovyBlock_${blockNode?.submitDataUuid?.replace("-", "")}"
+				"preProcessing" -> "GroovyBlock_${block.id.toString().replace("-", "")}_preprocessing"
 				else -> throw IllegalArgumentException("compileFormCode must be specified correctly")
 			}
 		}
@@ -51,13 +57,27 @@ object GroovyJarCompiler {
 				block.outputNames
 			)
 		} else {
-			wrapGroovySourceForFormSubmitProcessing(
-				className,
-				script,
-				block.inputNames,
-				block.outputNames,
-				isNeedReturn
-			)
+			when (compileFormCode) {
+				"mainProcessing",
+				"submitData" ->
+					wrapGroovySourceForFormSubmitProcessing(
+						className,
+						script,
+						block.inputNames,
+						block.outputNames,
+						isNeedReturn
+					)
+
+				"preProcessing" -> wrapGroovySourceForFormPreProcessing(
+					className,
+					script,
+					block.inputNames,
+					block.outputNames
+				)
+
+				else -> null
+			} ?: throw IllegalArgumentException("compileFormCode must be specified correctly")
+
 		}
 		val simpleName = fqcn.substringAfterLast('.')
 		// 2. Абсолютный каталог вывода + гарантированное создание
@@ -111,11 +131,11 @@ object GroovyJarCompiler {
 			}
 			// создаём/очищаем файл через NIO
 			val path = jarFile.toPath()
-			val fos = java.nio.file.Files.newOutputStream(
+			val fos = Files.newOutputStream(
 				path,
-				java.nio.file.StandardOpenOption.CREATE,
-				java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
-				java.nio.file.StandardOpenOption.WRITE
+				CREATE,
+				TRUNCATE_EXISTING,
+				WRITE
 			)
 			JarOutputStream(fos).use { jar ->
 				val added = mutableSetOf<String>()
@@ -164,29 +184,32 @@ object GroovyJarCompiler {
 			.joinToString("\n")
 		val body = lines.filterNot { it.trim().startsWith("import ") }
 			.joinToString("\n")
-		val inputDecls = inputs.joinToString("\n        ") { nm -> "def $nm = inputs[\"$nm\"]" }
-		val outputDecls = outputs.joinToString("\n        ") { nm -> "def $nm = [:]" }
+		val inputDecls = inputs.joinToString("\n\t\t") { nm -> "def $nm = inputs[\"$nm\"]" }
+		val outputDecls = outputs.joinToString("\n\t\t") { nm -> "def $nm = [:]" }
 		val outputReturn = outputs.joinToString(", ") { nm -> "$nm: $nm" }
 		val fixedBody = fixForAndroid(body, inputs, outputs)
+		val taskDecl = "def TASK = inputs[\"TASK\"]"
+
 		return """
-	        |package ru.ravel.scripts
-	        |
-	        |@GrabConfig(initContextClass=false)
-	        |import groovy.transform.CompileDynamic
-	        |$imports
+			|package ru.ravel.scripts
 			|
-	        |class $className {
-	        |    @CompileDynamic
-	        |    static Map<String,Object> run(Map<String,Object> inputs) {
-	        |        $inputDecls
-	        |        $outputDecls
-	        |
-	        |        $fixedBody
-	        |
-	        |        return [$outputReturn]
-	        |    }
-	        |}
-	        """.trimMargin()
+			|@GrabConfig(initContextClass=false)
+			|import groovy.transform.CompileDynamic
+			|$imports
+			|
+			|class $className {
+			|    @CompileDynamic
+			|    static Map<String,Object> run(Map<String,Object> inputs) {
+			|        $inputDecls
+			|        $taskDecl
+			|        $outputDecls
+			|
+			|        $fixedBody
+			|
+			|        return [$outputReturn]
+			|    }
+			|}
+			""".trimMargin()
 	}
 
 
@@ -200,8 +223,9 @@ object GroovyJarCompiler {
 		val lines = script.lines()
 		val imports = lines.filter { it.trim().startsWith("import ") }
 			.joinToString("\n")
-		val inputDecls = inputs.joinToString("\n        ") { nm -> "def $nm = inputs[\"$nm\"]" }
-		val outputDecls = outputs.joinToString("\n        ") { nm -> "def $nm = [:]" }
+		val inputDecls = inputs.joinToString("\n\t\t") { nm -> "def $nm = inputs[\"$nm\"]" }
+		val outputDecls = outputs.joinToString("\n\t\t") { nm -> "def $nm = [:]" }
+		val taskDecl = "def TASK = inputs[\"TASK\"]"
 		val body = lines.filterNot { it.trim().startsWith("import ") }
 			.joinToString("\n")
 			.ifBlank { "[:]" }
@@ -217,6 +241,7 @@ object GroovyJarCompiler {
 	        |    @CompileDynamic
 	        |    static Map<String,Object> run(Map<String,Object> inputs) {
 	        |        $inputDecls
+			|		 $taskDecl
 	        |        $outputDecls
 			|
 	        |        ${if (isNeedReturn) "return" else ""} $fixedBody
@@ -224,6 +249,44 @@ object GroovyJarCompiler {
 	        |    }
 	        |}
 	        """.trimMargin()
+	}
+
+
+	private fun wrapGroovySourceForFormPreProcessing(
+		className: String,
+		script: String,
+		inputs: List<String>,
+		outputs: List<String>,
+	): String {
+		val dslRegex = Regex("""\s*\{\{(\w+)}}\.(\w+)\s*=\s*(.+)""")
+		val lines = script.lines()
+		val inputDecls = inputs.joinToString("\n\t\t") { nm -> "def $nm = inputs[\"$nm\"]" }
+		val outputDecls = outputs.joinToString("\n\t\t") { nm -> "def $nm = [:]" }
+		val taskDecl = "def TASK = inputs[\"TASK\"]"
+		val bindingsCode = buildString {
+			appendLine("def bindings = []")
+			for (line in lines) {
+				val m = dslRegex.matchEntire(line) ?: continue
+				val tag = m.groupValues[1]
+				val prop = m.groupValues[2]
+				val rhs = m.groupValues[3].trim()
+				appendLine("\t\tbindings << [tag: '$tag', property: '$prop', value: $rhs]")
+			}
+			appendLine("\t\treturn [bindings: bindings]")
+		}
+		return """
+		|package ru.ravel.scripts
+		|
+		|class $className {
+		|	static Map run(Map inputs) {
+		|		$inputDecls
+		|		$taskDecl
+		|		$outputDecls
+		|
+		|		$bindingsCode
+		|  }
+		|}
+		""".trimMargin()
 	}
 
 

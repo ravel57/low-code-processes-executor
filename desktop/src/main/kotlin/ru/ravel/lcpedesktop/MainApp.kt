@@ -77,7 +77,9 @@ class MainApp : Application() {
 
 	// Рабочая область
 	private val gridCanvas = Canvas(windowW, windowH)
-	private val workspaceGroup = Group()
+	private val blocksLayer = Group()
+	private val linesLayer = Group()
+	private val workspaceGroup = Group(blocksLayer, linesLayer)
 	val contentPane = Pane().apply {
 		children.setAll(gridCanvas, workspaceGroup)
 		prefWidth = windowW * 2
@@ -152,7 +154,8 @@ class MainApp : Application() {
 		onDeleteRequested = { bn -> deleteBlockRequest(bn) },
 		onInvalidConnections = { invalid ->
 			invalid.forEach { c ->
-				(c.line.parent as? Pane)?.children?.remove(c.line)
+				detach(c.line)
+				detach(c.pick)
 				connections.remove(c)
 				c.from.connectedLines.remove(c)
 				c.to.connectedLines.remove(c)
@@ -378,7 +381,8 @@ class MainApp : Application() {
 				}
 				blocks.clear()
 				connections.clear()
-				workspaceGroup.children.removeIf { it is BlockNode || it is Line }
+				blocksLayer.children.clear()
+				linesLayer.children.clear()
 				currentProjectFile = null
 				clearDirty()
 				updateTitle()
@@ -515,6 +519,19 @@ class MainApp : Application() {
 								)
 							}
 					}
+					b.preProcessingAbsolutePath
+						?.takeIf { it.exists() }
+						?.readText()
+						?.let { code ->
+							GroovyJarCompiler.compileToJar(
+								script = code,
+								block = b,
+								outputDir = outputDir,
+								compileFormCode = "preProcessing",
+								blockNode = null,
+								isNeedReturn = false,
+							)
+						}
 				}
 				all.groupBy { it.file }.forEach { (file, list) ->
 					val proj = projectRepo.loadProject(file).apply { baseDir = file.parentFile }
@@ -827,14 +844,16 @@ class MainApp : Application() {
 				markDirty()
 			},
 			callbacks = callbacks,
-		)
-		blocks.add(block)
-		block.onMove = {
-			ensureWorkspaceFits(block)
-			ensureBlockVisible(block)
-			markDirty()
+		).apply {
+			viewOrder = 10.0
+			onMove = {
+				ensureWorkspaceFits(this)
+				ensureBlockVisible(this)
+				markDirty()
+			}
 		}
-		workspaceGroup.children.add(block)
+		blocks.add(block)
+		blocksLayer.children.add(block)
 		setupHandlersForBlock(block)
 		Platform.runLater { scrollToRightmostBlock() }
 		markDirty()
@@ -936,10 +955,10 @@ class MainApp : Application() {
 						val tmp = Line(pc.x, pc.y, pc.x, pc.y).apply {
 							stroke = Color.BLUE
 							strokeWidth = 2.0
-							viewOrder = 1.0
+							viewOrder = -1.0
 						}
-						if (tmp.parent != workspaceGroup) {
-							workspaceGroup.children.add(tmp)
+						if (tmp.parent != linesLayer) {
+							linesLayer.children.add(tmp)
 						}
 						draggingLine = tmp
 						draggingFromBlock = block
@@ -980,12 +999,13 @@ class MainApp : Application() {
 						val visible = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
 							stroke = Color.BLUE
 							strokeWidth = 2.0
+							viewOrder = -1.0
 						}
 						val pick = Line(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y).apply {
 							stroke = Color.TRANSPARENT
 							strokeWidth = 12.0
 							isPickOnBounds = false
-							viewOrder = 0.9
+							viewOrder = -2.0
 						}
 						val conn =
 							Connection(
@@ -1000,11 +1020,11 @@ class MainApp : Application() {
 							)
 						conn.updateLine()
 						connections.add(conn)
-						if (!workspaceGroup.children.contains(visible)) {
-							workspaceGroup.children.add(visible)
+						if (!linesLayer.children.contains(visible)) {
+							linesLayer.children.add(visible)
 						}
-						if (!workspaceGroup.children.contains(pick)) {
-							workspaceGroup.children.add(pick)
+						if (!linesLayer.children.contains(pick)) {
+							linesLayer.children.add(pick)
 						}
 						pick.onMouseClicked = EventHandler { ev ->
 							if (ev.button == MouseButton.PRIMARY) {
@@ -1022,7 +1042,7 @@ class MainApp : Application() {
 					}
 
 					// убираем временную линию
-					workspaceGroup.children.remove(draggingLine)
+					linesLayer.children.remove(draggingLine)
 					draggingLine = null
 					draggingStarted = false
 					event.consume()
@@ -1171,7 +1191,8 @@ class MainApp : Application() {
 			contentPane.children.setAll(gridCanvas, workspaceGroup)
 			blocks.clear()
 			connections.clear()
-			workspaceGroup.children.removeIf { it is BlockNode || it is Line }
+			blocksLayer.children.clear()
+			linesLayer.children.clear()
 			val idToUi = mutableMapOf<UUID, BlockNode>()
 			project.blocks.forEach { cb ->
 				val b = BlockNode(
@@ -1265,7 +1286,7 @@ class MainApp : Application() {
 					markDirty()
 				}
 				blocks.add(b)
-				workspaceGroup.children.add(b)
+				blocksLayer.children.add(b)
 				setupHandlersForBlock(b)
 				idToUi[cb.id] = b
 			}
@@ -1302,11 +1323,11 @@ class MainApp : Application() {
 				(pick.parent as? Pane)?.children?.remove(pick)
 				(visible.parent as? Group)?.children?.remove(visible)
 				(pick.parent as? Group)?.children?.remove(pick)
-				if (visible.parent != workspaceGroup) {
-					workspaceGroup.children.add(visible)
+				if (visible.parent != linesLayer) {
+					linesLayer.children.add(visible)
 				}
-				if (pick.parent != workspaceGroup) {
-					workspaceGroup.children.add(pick)
+				if (pick.parent != linesLayer) {
+					linesLayer.children.add(pick)
 				}
 				pick.onMouseClicked = EventHandler { ev ->
 					if (ev.button == MouseButton.PRIMARY) {
@@ -1679,6 +1700,9 @@ class MainApp : Application() {
 					resolveStored(projectFile.parentFile, blockPostNode.mainProcessingCodePath!!)
 				blockPostNode.submitDataAbsolutePath =
 					resolveStored(projectFile.parentFile, blockPostNode.submitDataCodePath!!)
+			}
+			b.preProcessingAbsolutePath = b.preProcessingCodePath?.let { p ->
+				resolveStored(projectFile.parentFile, p)
 			}
 			acc.add(BlockLoc(thisFile, b))
 		}

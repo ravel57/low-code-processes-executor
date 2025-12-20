@@ -641,6 +641,22 @@ class EngineRunner(
 					val inputs = collectInputs(block, project)
 					val specJson = readCode(block, project)
 					val initial = inputs.toMutableMap()
+
+					// --- PRE-PROCESSING ONLY FOR FORM BLOCKS ---
+					block.preProcessingClassName?.takeIf { it.isNotBlank() }?.let { cls ->
+						val codePath = block.preProcessingCodePath
+						if (!codePath.isNullOrBlank()) {
+							val code = readCode(block, project)
+							if (code.isNotBlank()) {
+								val exec = requireNotNull(groovy)
+								val ctx = inputs.mapValues { (_, v) -> deepCopyMap(v) }.toMutableMap()
+								@Suppress("UNCHECKED_CAST")
+								val ret = exec.exec(code, ctx, cls) as Map<out String, MutableMap<String, Any?>>
+								initial.putAll(ret)
+							}
+						}
+					}
+
 					formPauseOn()
 					val submittedRaw = try {
 						awaitForm(block, specJson, initial)
