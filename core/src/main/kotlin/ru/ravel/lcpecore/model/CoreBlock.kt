@@ -6,7 +6,7 @@ import java.util.*
 
 
 @JsonIgnoreProperties(ignoreUnknown = true)
-data class CoreBlock @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) constructor(
+data class CoreBlock /*@JsonCreator(mode = JsonCreator.Mode.PROPERTIES)*/ constructor(
 	@JsonProperty("id")
 	var id: UUID = UUID.randomUUID(),
 

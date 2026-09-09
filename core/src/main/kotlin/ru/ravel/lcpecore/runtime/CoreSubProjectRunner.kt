@@ -68,6 +68,7 @@ class CoreSubProjectRunner(
 		val receivers = sub.blocks.filter { it.type == BlockType.START || it.type == BlockType.INPUT_DATA }
 		val byName = receivers.associateBy { it.name }
 
+		@Suppress("UNCHECKED_CAST")
 		fun asMutableMap(v: Any?): MutableMap<String, Any?> = when (v) {
 			is MutableMap<*, *> -> (v as MutableMap<String, Any?>)
 			is Map<*, *> -> (v as Map<String, Any?>).toMutableMap()
@@ -111,6 +112,7 @@ class CoreSubProjectRunner(
 		val innerExits = sub.blocks.filter { it.type == BlockType.EXIT }
 		val exitsByName = innerExits.associateBy { it.name }
 
+		@Suppress("KotlinConstantConditions")
 		val out = parentBlock.outputNames.mapIndexed { idx, name ->
 			val ex = exitsByName[name]
 				?: innerExits.getOrNull(idx)

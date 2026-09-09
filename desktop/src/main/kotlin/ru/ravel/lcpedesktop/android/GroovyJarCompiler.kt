@@ -99,10 +99,10 @@ object GroovyJarCompiler {
 		}
 		println(
 			"== GroovyJarCompiler ==\n" +
-					"  outDirAbs    = ${outDirAbs.absolutePath}\n" +
+					"  outDirAbs	= ${outDirAbs.absolutePath}\n" +
 					"  jarFile      = ${jarFile.absolutePath}\n" +
-					"  jarParent    = ${jarParent.absolutePath}\n" +
-					"  existsDir    = ${jarParent.exists()}\n" +
+					"  jarParent	= ${jarParent.absolutePath}\n" +
+					"  existsDir	= ${jarParent.exists()}\n" +
 					"  canWriteDir  = ${jarParent.canWrite()}\n" +
 					"  isDir        = ${jarParent.isDirectory}"
 		)
@@ -160,7 +160,7 @@ object GroovyJarCompiler {
 			System.err.println(
 				"Ошибка при записи JAR:\n" +
 						"  jarFile      = ${jarFile.absolutePath}\n" +
-						"  jarExists    = ${jarFile.exists()}\n" +
+						"  jarExists	= ${jarFile.exists()}\n" +
 						"  jarIsDir     = ${jarFile.isDirectory}\n" +
 						"  parentExists = ${jarParent.exists()}\n" +
 						"  parentIsDir  = ${jarParent.isDirectory}\n" +
@@ -198,8 +198,8 @@ object GroovyJarCompiler {
 			|$imports
 			|
 			|class $className {
-			|    @CompileDynamic
-			|    static Map<String,Object> run(Map<String,Object> inputs) {
+			|	@CompileDynamic
+			|	static Map<String,Object> run(Map<String,Object> inputs) {
 			|        $inputDecls
 			|        $taskDecl
 			|        $outputDecls
@@ -207,7 +207,7 @@ object GroovyJarCompiler {
 			|        $fixedBody
 			|
 			|        return [$outputReturn]
-			|    }
+			|	}
 			|}
 			""".trimMargin()
 	}
@@ -231,24 +231,45 @@ object GroovyJarCompiler {
 			.ifBlank { "[:]" }
 		val fixedBody = fixForAndroid(body, inputs, outputs)
 		return """
-	        |package ru.ravel.scripts
-	        |
-	        |@GrabConfig(initContextClass=false)
-	        |import groovy.transform.CompileDynamic
-	        |$imports
+			|package ru.ravel.scripts
 			|
-	        |class $className {
-	        |    @CompileDynamic
-	        |    static Map<String,Object> run(Map<String,Object> inputs) {
-	        |        $inputDecls
-			|		 $taskDecl
-	        |        $outputDecls
+			|@GrabConfig(initContextClass=false)
+			|import groovy.transform.CompileDynamic
+			|$imports
 			|
-	        |        ${if (isNeedReturn) "return" else ""} $fixedBody
+			|class $className {
+			|
+			|	static Object __view(String id) {
+			|        try {
+			|            def cls = Class.forName("ru.ravel.ulwms.utils.ViewRegistry")
+			|            def inst = cls.getField("INSTANCE").get(null)
+			|            return inst.get(id)
+			|        } catch (Throwable ignored) {
+			|            return null
+			|        }
+			|	}
+			|
+			|	static Object __text(String id) {
+			|        def v = __view(id)
+			|        if (v == null) return null
+			|        try {
+			|            return v.getClass().getMethod("getText").invoke(v)
+			|        } catch (Throwable ignored) {
+			|            try { return v.toString() } catch (Throwable ignored2) { return null }
+			|        }
+			|	}
+			|
+			|	@CompileDynamic
+			|	static Map<String,Object> run(Map<String,Object> inputs) {
+			|        $inputDecls
+			|        $taskDecl
+			|        $outputDecls
+			|
+			|        ${if (isNeedReturn) "return" else ""} $fixedBody
 			|        ${if (!isNeedReturn) "return [:]" else ""}
-	        |    }
-	        |}
-	        """.trimMargin()
+			|	}
+			|}
+			""".trimMargin()
 	}
 
 
@@ -260,13 +281,33 @@ object GroovyJarCompiler {
 	): String {
 		val dslRegex = Regex("""\s*\{\{(\w+)}}\.(\w+)\s*=\s*(.+)""")
 		val lines = script.lines()
+
+		val imports = lines
+			.filter { it.trim().startsWith("import ") }
+			.joinToString("\n")
+
 		val inputDecls = inputs.joinToString("\n\t\t") { nm -> "def $nm = inputs[\"$nm\"]" }
 		val outputDecls = outputs.joinToString("\n\t\t") { nm -> "def $nm = [:]" }
 		val taskDecl = "def TASK = inputs[\"TASK\"]"
+
+		// Всё, что НЕ является DSL-строкой {{id}}.prop = ...
+		val body = lines
+			.filterNot { it.trim().startsWith("import ") }
+			.filterNot { dslRegex.matchEntire(it.trim()) != null }
+			.joinToString("\n")
+			.trim()
+
 		val bindingsCode = buildString {
 			appendLine("def bindings = []")
+
+			// Исполняем обычный код пользователя (если есть)
+			if (body.isNotBlank()) {
+				appendLine(body)
+			}
+
+			// DSL-строки: и собираем bindings, и сразу шлём в UI (или очередь)
 			for (line in lines) {
-				val m = dslRegex.matchEntire(line) ?: continue
+				val m = dslRegex.matchEntire(line.trim()) ?: continue
 				val tag = m.groupValues[1]
 				val prop = m.groupValues[2]
 				val rhs = m.groupValues[3].trim()
@@ -276,6 +317,8 @@ object GroovyJarCompiler {
 		}
 		return """
 		|package ru.ravel.scripts
+		|
+		|$imports
 		|
 		|class $className {
 		|	static Map run(Map inputs) {
@@ -292,6 +335,22 @@ object GroovyJarCompiler {
 
 	private fun fixForAndroid(body: String, inputs: List<String>, outputs: List<String>): String {
 		var fixed = body
+
+		// {{id}}.text -> __text("id")
+		fixed = Regex("""\{\{([\w-]+)}}\s*\?\.\s*text\b""").replace(fixed) { m ->
+			val id = m.groupValues[1]
+			"""__text("$id")"""
+		}
+		fixed = Regex("""\{\{([\w-]+)}}\s*\.\s*text\b""").replace(fixed) { m ->
+			val id = m.groupValues[1]
+			"""__text("$id")"""
+		}
+		// {{id}} -> __view("id")
+		fixed = Regex("""\{\{([\w-]+)}}""").replace(fixed) { m ->
+			val id = m.groupValues[1]
+			"""__view("$id")"""
+		}
+
 		val ignoreVars = (inputs + outputs).toSet()
 		fixed = Regex("""(\w+)\.(\w+)\s*=\s*([^\n]+)""")
 			.replace(fixed) { m ->

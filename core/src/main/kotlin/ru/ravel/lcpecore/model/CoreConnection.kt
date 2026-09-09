@@ -6,7 +6,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import java.util.*
 
 
-data class CoreConnection @JsonCreator(mode = JsonCreator.Mode.PROPERTIES) constructor(
+data class CoreConnection /*@JsonCreator(mode = JsonCreator.Mode.PROPERTIES)*/ constructor(
 	@JsonProperty("fromId")
 	val fromId: UUID,
 

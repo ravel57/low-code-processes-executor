@@ -19,7 +19,7 @@ object DexCompiler {
 			?: throw IllegalStateException("ANDROID_HOME не задан в окружении")
 
 		// 1) Собираем combined JAR и одновременно собираем провайдеры из META-INF/services/**
-		val combinedJar = createTempFile(prefix = "combined-", suffix = ".jar")
+		val combinedJar = kotlin.io.path.createTempFile(prefix = "combined-", suffix = ".jar").toFile()
 		val services = LinkedHashMap<String, MutableSet<String>>() // name -> providers
 
 		JarOutputStream(FileOutputStream(combinedJar)).use { jos ->
@@ -89,7 +89,7 @@ object DexCompiler {
 			.firstOrNull { it.exists() }
 			?: throw IllegalStateException("Не найден android.jar в $androidHome/platforms")
 
-		val outDexDir = createTempDir(prefix = "d8-out-")
+		val outDexDir = kotlin.io.path.createTempDirectory(prefix = "d8-out-").toFile()
 		val args = mutableListOf(
 			d8.absolutePath,
 			"--min-api", minApi.toString(),

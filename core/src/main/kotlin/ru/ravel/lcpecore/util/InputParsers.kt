@@ -17,12 +17,12 @@ object InputParsers {
 			InputFormatType.XML -> {
 				(XmlMapper().readValue(text ?: "<root/>", Map::class.java) as Map<String, Any>).toMutableMap()
 			}
-			InputFormatType.PROTOBUF -> {
-				mutableMapOf("_error" to "PROTOBUF not implemented")
-			}
-			InputFormatType.TOML -> {
-				mutableMapOf("_error" to "TOML not implemented")
-			}
+//			InputFormatType.PROTOBUF -> {
+//				mutableMapOf("_error" to "PROTOBUF not implemented")
+//			}
+//			InputFormatType.TOML -> {
+//				mutableMapOf("_error" to "TOML not implemented")
+//			}
 		}
 	} catch (e: Exception) {
 		mutableMapOf("_parseError" to (e.message ?: "parse error"))

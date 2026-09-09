@@ -1116,14 +1116,14 @@ class MainApp : Application() {
 					Yaml(opts).dump(output)
 				}
 
-				InputFormatType.PROTOBUF -> {
-					// Старое поведение оставляло TODO — сохраняем это же поведение
-					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
-				}
-
-				InputFormatType.TOML ->
-					// Старое поведение оставляло TODO — сохраняем это же поведение
-					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
+//				InputFormatType.PROTOBUF -> {
+//					// Старое поведение оставляло TODO — сохраняем это же поведение
+//					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
+//				}
+//
+//				InputFormatType.TOML ->
+//					// Старое поведение оставляло TODO — сохраняем это же поведение
+//					ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(output)
 			}
 			codeArea.replaceText(text)
 		}

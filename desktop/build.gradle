@@ -1,101 +1,211 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
 	id 'java'
 	id 'org.jetbrains.kotlin.jvm'
 	id 'application'
 	id 'org.openjfx.javafxplugin'
-	id 'org.javamodularity.moduleplugin'
+	id 'org.javamodularity.moduleplugin' version '2.0.0'
 	id 'com.github.johnrengelman.shadow' version '8.1.1'
+	id 'org.beryx.jlink' version '3.2.1'
 }
 
 java {
-	toolchain { languageVersion = JavaLanguageVersion.of(17) }
-	modularity.inferModulePath = false
-}
-
-javafx {
-	version = '21.0.5'
-	modules = ['javafx.controls', 'javafx.fxml']
-}
-
-dependencies {
-	implementation project(':core')
-	implementation 'org.openjfx:javafx-controls:21.0.2'
-	implementation 'org.openjfx:javafx-fxml:21.0.2'
-	implementation 'org.openjfx:javafx-web:21.0.2'
-	implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.23'
-	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.15.2'
-	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.15.2'
-
-	implementation 'org.apache.groovy:groovy:4.0.28'
-	implementation 'org.apache.groovy:groovy-jsr223:4.0.28'
-	implementation 'org.apache.groovy:groovy-json:4.0.28'
-	implementation 'org.apache.groovy:groovy-xml:4.0.28'
-	implementation 'org.apache.groovy:groovy-sql:4.0.28'
-	implementation 'org.postgresql:postgresql:42.7.7'
-	implementation "org.graalvm.js:js:24.2.1"
-	runtimeOnly 'org.graalvm.js:js-scriptengine:24.2.1'
-	implementation 'org.graalvm.polyglot:polyglot:24.2.1'
-	implementation 'org.graalvm.polyglot:js:24.2.1'
-
-	implementation 'org.openjdk.nashorn:nashorn-core:15.4'
-	implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.0'
-	implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0'
-	implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-debug:1.9.0'
-	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-javafx:1.9.0"
-	implementation 'org.yaml:snakeyaml:2.5'
-	implementation 'org.fxmisc.richtext:richtextfx:0.11.5'
-}
-
-application {
-	mainClass = "ru.ravel.lcpedesktop.MainApp"
-}
-
-java {
+	toolchain { languageVersion = JavaLanguageVersion.of(21) }
 	sourceCompatibility = JavaVersion.VERSION_21
 	targetCompatibility = JavaVersion.VERSION_21
 	modularity.inferModulePath = true
 }
 
-tasks.named('compileKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
+javafx {
+	version = "21.0.7"
+	modules = ['javafx.controls', 'javafx.fxml']
+	configuration = 'implementation'
+}
+
+dependencies {
+	implementation project(':core')
+	implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.3.10'
+	implementation 'com.fasterxml.jackson.module:jackson-module-kotlin:2.21.0'
+	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.21.0'
+
+	implementation 'org.apache.groovy:groovy:5.0.4'
+	implementation 'org.apache.groovy:groovy-jsr223:5.0.4'
+	implementation 'org.apache.groovy:groovy-json:5.0.4'
+	implementation 'org.apache.groovy:groovy-xml:5.0.4'
+	implementation 'org.apache.groovy:groovy-sql:5.0.4'
+	implementation 'org.postgresql:postgresql:42.7.9'
+	implementation 'org.graalvm.js:js:25.0.2'
+	runtimeOnly 'org.graalvm.js:js-scriptengine:25.0.2'
+	implementation 'org.graalvm.polyglot:polyglot:25.0.2'
+	implementation 'org.graalvm.polyglot:js:25.0.2'
+
+	implementation 'org.openjdk.nashorn:nashorn-core:15.7'
+	implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.0'
+	implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2'
+	runtimeOnly 'org.jetbrains.kotlinx:kotlinx-coroutines-debug:1.10.2'
+	implementation "org.jetbrains.kotlinx:kotlinx-coroutines-javafx:1.10.2"
+	implementation 'org.yaml:snakeyaml:2.5'
+	implementation 'org.fxmisc.richtext:richtextfx:0.11.7'
+}
+
+def javafxVersion = "21.0.7"
+def javafxZip = file("$buildDir/javafx-sdk-${javafxVersion}-win.zip")
+def javafxExtractDir = file("$buildDir/javafx-sdk")
+
+tasks.register('unpackJavafxSdk') {
+	dependsOn tasks.named('downloadJavafxSdk')
+	doLast {
+		delete(javafxExtractDir)
+		copy {
+			from(zipTree(javafxZip))
+			into(javafxExtractDir)
+		}
+		def inner = javafxExtractDir.listFiles()?.find { it.isDirectory() && it.name.startsWith("javafx-sdk") }
+		if (inner == null) throw new GradleException("Cannot find javafx-sdk dir inside zip")
+		copy {
+			from(inner)
+			into(javafxExtractDir)
+		}
+	}
+}
+
+tasks.register('downloadJavafxSdk') {
+	doLast {
+		javafxZip.parentFile.mkdirs()
+		def url = "https://download2.gluonhq.com/openjfx/${javafxVersion}/openjfx-${javafxVersion}_windows-x64_bin-sdk.zip"
+		new URL(url).withInputStream { i -> javafxZip.withOutputStream { it << i } }
+	}
+}
+
+def jpackageInputDir = file("$buildDir/jpackageInput")
+def javafxSdkDir = file("$buildDir/javafx-sdk")
+
+tasks.register('stageJpackageInput') {
+	dependsOn tasks.named('shadowJar')
+	dependsOn tasks.named('unpackJavafxSdk')
+	doLast {
+		delete(jpackageInputDir)
+		copy {
+			from(tasks.named('shadowJar').get().archiveFile.get().asFile)
+			into(jpackageInputDir)
+			rename { "desktop-all.jar" }
+		}
+		if (!javafxSdkDir.exists()) {
+			throw new GradleException("JavaFX SDK not found: ${javafxSdkDir}. Put it into desktop/javafx-sdk")
+		}
+		copy {
+			from(javafxSdkDir)
+			into(new File(jpackageInputDir, "javafx-sdk"))
+		}
+	}
+}
+
+application {
+	mainClass = "ru.ravel.lcpedesktop.MainApp"
+	mainModule = "ru.ravel.lcpedesktop"
+	applicationDefaultJvmArgs = [
+		"--module-path", "${projectDir}/javafx-sdk-21.0.7-win/lib",
+		"--add-modules", "javafx.controls,javafx.fxml"
+	]
+}
+
+tasks.named('compileKotlin', KotlinCompile) {
 	kotlinOptions.jvmTarget = '21'
 	destinationDirectory.set(
 		tasks.named('compileJava', JavaCompile).get().destinationDirectory
 	)
 }
 
-tasks.named('compileTestKotlin', org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
+tasks.named('compileTestKotlin', KotlinCompile) {
 	kotlinOptions.jvmTarget = '21'
 	destinationDirectory.set(
 		tasks.named('compileTestJava', JavaCompile).get().destinationDirectory
 	)
 }
 
-jar {
-	enabled = false
-	from {
-		configurations.runtimeClasspath
-			.filter { it.name.endsWith(".jar") }
-			.collect { zipTree(it) }
-	}
-	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-	manifest { attributes "Main-Class": "ru.ravel.testjavafx.MainApp" }
-}
-
 tasks.named('shadowJar') {
+	archiveFileName = "desktop-all.jar"
 	archiveClassifier.set('')
 	mergeServiceFiles()
-	manifest { attributes 'Main-Class': 'ru.ravel.lcpedesktop.MainApp' }
+	manifest {
+		attributes(
+			'Main-Class': 'ru.ravel.lcpedesktop.MainApp',
+			'Automatic-Module-Name': 'ru.ravel.lcpedesktop'
+		)
+	}
 }
 
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+tasks.withType(KotlinCompile).configureEach {
 	kotlinOptions {
 		jvmTarget = "21"
 	}
 }
 
-applicationDefaultJvmArgs = [
-		"--add-opens=kotlinx.coroutines.core/kotlinx.coroutines.debug.internal=ALL-UNNAMED",
-		"--add-modules", "javafx.controls,javafx.web",
-		"-Dkotlinx.coroutines.debug=on",
-		"-Dpolyglot.engine.WarnInterpreterOnly=false",
-]
+tasks.named('jar', Jar) {
+    archiveFileName = "desktop.jar"
+	manifest {
+		attributes(
+			'Automatic-Module-Name': 'ru.ravel.lcpedesktop',
+			'Main-Class': 'ru.ravel.lcpedesktop.MainApp'
+		)
+	}
+}
+
+jlink {
+	options = ['--strip-debug', '--compress', '2', '--no-header-files', '--no-man-pages']
+	configuration = "jlinkRuntime"
+	moduleName = "ru.ravel.lcpedesktop"
+	mergedModule { additive = true }
+	launcher { name = "ULP" }
+	addExtraDependencies("javafx")
+	addExtraDependencies("kotlin")
+	addExtraDependencies("kotlinx.coroutines")
+}
+
+jlinkZip {
+	group = 'distribution'
+}
+
+configurations {
+	jlinkRuntime {
+		extendsFrom(runtimeClasspath)
+	}
+}
+
+tasks.register('sanitizeJlinkRuntime') {
+	doLast {
+		def bad = configurations.jlinkRuntime.files.findAll { it.name.endsWith(".pom") }
+		if (!bad.isEmpty()) {
+			throw new GradleException("POM files in jlinkRuntime:\n${bad.join("\n")}")
+		}
+	}
+}
+
+configurations.jlinkRuntime {
+	exclude group: "org.graalvm.js", module: "js"
+}
+
+configurations.runtimeClasspath {
+	exclude group: "org.graalvm.js", module: "js"
+}
+
+tasks.register('jpackageFromShadow', Exec) {
+	dependsOn tasks.named('stageJpackageInput')
+
+	commandLine(
+		"${System.getenv("JAVA_HOME")}/bin/jpackage",
+		"--type", "app-image",
+		"--name", "ULP",
+		"--input", jpackageInputDir.absolutePath,
+		"--main-jar", "desktop-all.jar",
+		"--main-class", "ru.ravel.lcpedesktop.MainApp",
+		"--dest", "$buildDir/jpackage-shadow",
+//		"--win-console",
+
+		"--java-options", "--module-path",
+		"--java-options", "\$APPDIR\\javafx-sdk\\lib",
+		"--java-options", "--add-modules",
+		"--java-options", "javafx.controls,javafx.fxml"
+	)
+}
